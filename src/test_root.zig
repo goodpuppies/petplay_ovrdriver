@@ -43,3 +43,17 @@ export fn pp_test_set_directory(path: [*:0]const u8) callconv(.c) bool {
 export fn pp_test_ipc_listening() callconv(.c) bool {
     return state.ipc_listening.load(.acquire);
 }
+
+export fn pp_test_direct_layout(which: u32) callconv(.c) usize {
+    return switch (which) {
+        0 => @sizeOf(abi.SwapSet),
+        1 => @sizeOf(abi.LayerEye),
+        2 => @offsetOf(abi.LayerEye, "pose"),
+        3 => @offsetOf(abi.LayerEye, "prediction"),
+        else => 0,
+    };
+}
+
+export fn pp_test_fence_layout(which: u32) callconv(.c) usize {
+    return @import("fence_probe.zig").layout(which);
+}

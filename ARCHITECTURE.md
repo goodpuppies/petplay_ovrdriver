@@ -23,7 +23,8 @@ the vrserver-owned driver instance.
 
 - Pure Zig C factory and explicit Linux x86-64 C++ ABI provider/device interface objects.
 - Runtime context/host lookup, driver handle, lifecycle, standby and RunFrame counters.
-- No devices registered yet; device activation fails explicitly.
+- No devices by default. Explicit synthetic mode registers an HMD and display redirect;
+  the separate ABI-probe device still deliberately fails activation.
 - Versioned native Stageforge JSON envelopes, callbacks, dispatch errors, bounded 16 KiB packets,
   per-request allocator arenas, and Unicode/BigInt-tag roundtrips. No JS evaluator in the driver.
 - A private Unix-domain stream socket at `/run/user/<uid>/petplay_ovrdriver/control.sock`.
@@ -60,7 +61,8 @@ router attaches via Unix IPC. Tests cover no-INIT proxy attach, health from the 
 codec roundtrip, stable identity/state after detach/reattach, pending callback rejection,
 prompt Cleanup while connected, owner-lock contention, endpoint removal and insecure-directory
 refusal. Separate tests cover the creation protocol and malformed/oversized stream recovery.
-The live driver hasn't been registered or loaded by SteamVR yet.
+The live driver has also been loaded in a temporary synthetic-only SteamVR session;
+see [live results and limits](LIVE-LAB.md).
 
 The driver links libc for pthreads, not libc++. Zig's no-libc thread implementation depends on
 Zig-owned process/TLS startup and is unsuitable for a DSO embedded in a foreign host. The
@@ -69,15 +71,46 @@ outside the verified contract.
 
 ## Next: programmable hardware-free lab
 
-Implement a synthetic HMD/display, then left/right controllers and input profiles. A
-controller-only driver would still need a physical HMD. Prove Linux compositor startup/output
-with physical display drivers unselected; surfaceless output and final-image capture are
-separate feasibility checks. Runtime registration and test-mode activation need exact settings
-backup/restore and recovery for interruption, rather than unconditional startup changes.
+Synthetic HMD registration, Linux compositor startup and a controlled 75 Hz clock are now
+verified with physical drivers excluded. The server publishes a fixed head pose on a 250 Hz
+absolute monotonic grid, skipping missed slots. It blocks standby only while the synthetic HMD
+is active; provider RunFrame is not a display/pose clock. The compositor provider is a separate
+process-local instance, has no actor socket, and supplies its own monotonic virtual-vsync count.
+Clock count advances even when callbacks are missed; neither Present counts nor JS timers
+determine it. Server actor health counters describe the server instance, not compositor callbacks.
 
-Upload time-based trajectories once; evaluate them in Zig at scheduled monotonic timestamps,
-with analytic velocity and real sample-time offset. Apply future control mutations on the
-appropriate driver/device owner thread via a bounded queue. Do not put per-sample JS/IPC or
-blocking network work in RunFrame. Compare commanded samples, client-predicted poses,
+The enclosing repo's scoped launcher backs up exact settings/registration bytes before
+mutation and restores them after stopping SteamVR. A pending restore file refuses another
+session. Linux needs an internal mirror-window fallback setting and an X11 compositor launch;
+this is a desktop-dependent lab, not yet a surfaceless runtime. See LIVE-LAB.md for recovery.
+
+Left/right controllers, their input profile and queued analytic trajectory controls are now
+implemented and measured through public OpenVR poses; see [controller details](CONTROLLER-LAB.md).
+Next is compositor final-image capture. The current clocked discard sink does not read GPU textures or prove
+final-image delivery. In the verified run Linux queried its timing but never called its
+Present/WaitForPresent methods. Investigate that output path before using it as evidence of
+compositor-consumed overlay coherence.
+
+Motion definitions are uploaded once and evaluated in Zig at monotonic sample timestamps,
+with analytic velocity and real sample-time offset. A bounded eight-command queue applies
+validated motion changes at a native sampling boundary. Sampling uses its own thread and
+absolute 250 Hz grid; missed slots are skipped, not replayed. Snapshot reads and control
+changes use the shared state mutex; this is soft real-time, not a bounded-latency guarantee.
+Do not put per-sample JS/IPC or blocking network work in RunFrame. Compare commanded samples, client-predicted poses,
 publication and compositor-consumed images under explicit optical/timing/workload profiles.
 A driver does not itself solve atomic overlay publication or prove displayed cadence.
+
+## Experimental Linux driver-direct output
+
+The opt-in driverDirect backend replaces DisplayRedirect with a distinct
+IVRDriverDirectModeComponent_009 object. Its vtable and IVRIPCResourceManagerClient_003 prefix
+are explicit Zig ABI declarations, validated against the existing official SDK header. Image
+handles/FDs stay native in a bounded ledger; GETDIRECTSTATE exposes diagnostic counters.
+A separate native display clock announces vsync through the host and PostPresent paces the
+consumer. The compositor-side virtual-display plugin is disabled for this backend.
+
+Live SteamVR allocates and submits real per-eye images. External GPU readback, public producer completion
+and runtime teardown references still need work. The optional producer-side capture layer
+now verifies actual driver buffer pixels; see GPU-READBACK.md. A synthetic output backend also changes
+SteamVR's Linux async/reprojection selection, so it must not silently stand in for physical-HMD
+behavior. See [DIRECT-MODE.md](DIRECT-MODE.md) for exact evidence and next acceptance criteria.

@@ -1,0 +1,9 @@
+{
+  "driver_petplay": {
+    "enable": true,
+    "syntheticHmd": false,
+    "driverDirect": false,
+    "socketDirectory": "",
+    "syntheticControllers": false
+  }
+}

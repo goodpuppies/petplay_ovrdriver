@@ -37,3 +37,26 @@ test "fire and forget is silent; terminate detaches instead of exiting host" {
     try std.testing.expect((try actor.dispatch(a, "{\"kind\":\"terminate\"}")) == null);
     try std.testing.expect(actor.close_requested);
 }
+
+test "controller commands reject unknown fields and remain inert when disabled" {
+    var actor: native.Actor = .{};
+    try init(&actor);
+    for ([_][]const u8{
+        \\{"mode":"sine","frequencyHz":0}
+        ,
+        \\{"mode":"sine","frequncyHz":1}
+        ,
+        \\{"mode":"other"}
+    }) |payload| {
+        const packet = try std.fmt.allocPrint(a, "{{\"kind\":\"message\",\"data\":{{\"address\":{{\"fm\":\"test@x\",\"to\":\"driver@00000000-0000-0000-0000-000000000001\"}},\"type\":\"SETCONTROLLERMOTION:test\",\"payload\":{s}}}}}", .{payload});
+        defer a.free(packet);
+        const response = (try actor.dispatch(a, packet)).?;
+        defer a.free(response);
+        try std.testing.expect(std.mem.indexOf(u8, response, "__actorError") != null);
+    }
+    const response = (try actor.dispatch(a,
+        \\{"kind":"message","data":{"address":{"fm":"test@x","to":"driver@00000000-0000-0000-0000-000000000001"},"type":"SETCONTROLLERMOTION:disabled","payload":{"mode":"sine"}}}
+    )).?;
+    defer a.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "ControllersDisabled") != null);
+}

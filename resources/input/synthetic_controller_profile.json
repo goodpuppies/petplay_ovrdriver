@@ -1,0 +1,10 @@
+{
+  "jsonid": "input_profile",
+  "controller_type": "petplay_synthetic",
+  "input_bindingui_mode": "controller_handed",
+  "input_source": {
+    "/input/trigger": { "type": "trigger", "click": true, "order": 1 },
+    "/output/haptic": { "type": "vibration", "order": 2 }
+  },
+  "default_bindings": []
+}

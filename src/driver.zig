@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const state = @import("state.zig");
+const hmd = @import("hmd.zig");
 const ipc = @import("ipc.zig");
 pub var transport: ipc.Server = .{};
 const actor_mod = @import("actor.zig");
@@ -9,7 +10,7 @@ var actor: actor_mod.Actor = .{ .process_owner = "steamvr" };
 var request_busy = std.atomic.Value(bool).init(false);
 var provider: abi.Provider = .{ .vtable = &provider_table.methods };
 var device: abi.Device = .{ .vtable = &device_table.methods };
-const versions = [_:null]?[*:0]const u8{ abi.provider_version, abi.device_version, abi.host_version };
+const versions = [_:null]?[*:0]const u8{ abi.provider_version, abi.device_version, abi.host_version, abi.display_version, abi.virtual_display_version, abi.display_legacy_version, abi.plugin_version, abi.direct_version, abi.resource_version };
 const provider_table: abi.Table(abi.ProviderMethods) = .{ .methods = .{
     .init = init,
     .cleanup = cleanup,
@@ -28,6 +29,10 @@ const device_table: abi.Table(abi.DeviceMethods) = .{ .methods = .{
     .getPose = getPose,
 } };
 export fn HmdDriverFactory(name: ?[*:0]const u8, code: ?*i32) callconv(.c) ?*anyopaque {
+    if (name) |n| if (std.mem.eql(u8, std.mem.span(n), abi.plugin_version)) {
+        if (code) |c| c.* = 0;
+        return &@import("compositor.zig").object;
+    };
     if (name) |n| if (std.mem.eql(u8, std.mem.span(n), abi.provider_version)) {
         if (code) |c| c.* = 0;
         return &provider;
@@ -47,15 +52,32 @@ fn init(_: *abi.Provider, context: ?*abi.Context) callconv(.c) i32 {
     state.standby.store(false, .release);
     state.initialized.store(true, .release);
     state.ipc_failed.store(false, .release);
-    transport.start() catch {
-        state.ipc_failed.store(true, .release);
-    };
-    // Milestone 1: context/ABI only. No synthetic or physical device is registered yet.
+    if (configureTransport(ctx)) {
+        transport.start() catch {
+            state.ipc_failed.store(true, .release);
+        };
+    } else state.ipc_failed.store(true, .release);
+    hmd.start(ctx, host.?);
     return 0;
+}
+// Steam's container can have a private /run/user. An explicit shared-home path
+// allows the host PetPlay process to attach without entering its mount namespace.
+fn configureTransport(ctx: *abi.Context) bool {
+    var err: i32 = 0;
+    const raw = ctx.vtable.getGenericInterface(ctx, abi.settings_version, &err) orelse return true;
+    if (err != 0) return true;
+    const settings: *abi.Settings = @ptrCast(@alignCast(raw));
+    var buffer: [96]u8 = @splat(0);
+    settings.vtable.getString(settings, "driver_petplay", "socketDirectory", &buffer, buffer.len, &err);
+    if (err == 5) return true; // No default on an older installation.
+    if (err != 0) return false;
+    const length = std.mem.indexOfScalar(u8, &buffer, 0) orelse return false;
+    return length == 0 or transport.setDirectory(buffer[0..length]);
 }
 fn cleanup(_: *abi.Provider) callconv(.c) void {
     state.initialized.store(false, .release);
     transport.stop();
+    hmd.stop();
     state.standby.store(false, .release);
     state.handle.store(0, .release);
     host = null;
@@ -67,7 +89,7 @@ fn runFrame(_: *abi.Provider) callconv(.c) void {
     if (state.initialized.load(.acquire)) _ = state.ticks.fetchAdd(1, .monotonic);
 }
 fn blockStandby(_: *abi.Provider) callconv(.c) bool {
-    return false;
+    return hmd.active.load(.acquire);
 }
 fn enterStandby(_: *abi.Provider) callconv(.c) void {
     state.standby.store(true, .release);

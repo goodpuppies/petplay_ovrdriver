@@ -6,6 +6,16 @@ pub fn build(b: *std.Build) void {
     const install = b.addInstallFile(driver.getEmittedBin(), "petplay/bin/linux64/driver_petplay.so");
     b.getInstallStep().dependOn(&install.step);
     b.installFile("driver.vrdrivermanifest", "petplay/driver.vrdrivermanifest");
+    b.installFile("resources/settings/default.vrsettings", "petplay/resources/settings/default.vrsettings");
+    b.installFile("resources/input/synthetic_controller_profile.json", "petplay/resources/input/synthetic_controller_profile.json");
+    const capture = b.addLibrary(.{ .name = "petplay_capture", .linkage = .dynamic, .root_module = b.createModule(.{ .root_source_file = b.path("src/capture_layer.zig"), .target = target, .optimize = optimize, .link_libc = true }) });
+    capture.root_module.addIncludePath(b.path("vendor/vulkan"));
+    const capture_install = b.addInstallArtifact(capture, .{});
+    const capture_step = b.step("capture-layer", "Build optional request-driven Vulkan readback diagnostic");
+    capture_step.dependOn(&capture_install.step);
+    const capture_test = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/capture_layer.zig"), .target = target, .optimize = optimize, .link_libc = true }) });
+    capture_test.root_module.addIncludePath(b.path("vendor/vulkan"));
+    capture_step.dependOn(&b.addRunArtifact(capture_test).step);
     const actor = b.addExecutable(.{ .name = "petplay_ovrdriver_actor", .root_module = b.createModule(.{ .root_source_file = b.path("src/actor_host.zig"), .target = target, .optimize = optimize }) });
     b.installArtifact(actor);
     const testlib = b.addLibrary(.{ .name = "petplay_abi_test", .linkage = .dynamic, .root_module = b.createModule(.{ .root_source_file = b.path("src/test_root.zig"), .target = target, .optimize = optimize, .link_libc = true }) });
@@ -23,6 +33,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }) });
+    const motion_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/motion.zig"), .target = target, .optimize = optimize }) });
+    test_step.dependOn(&b.addRunArtifact(motion_tests).step);
     const run_protocol = b.addRunArtifact(protocol_test);
     test_step.dependOn(&run_protocol.step);
     const transport_test = b.addSystemCommand(&.{ "python3", b.pathFromRoot("tests/transport_test.py") });

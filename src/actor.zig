@@ -62,7 +62,15 @@ pub const Actor = struct {
             if (colon == null) return null;
             return try reply(allocator, me, from, typ, true);
         }
+        if (std.mem.eql(u8, base, "SETCONTROLLERMOTION")) {
+            const next = parseMotion(payload) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
+            const id = @import("controllers.zig").enqueue(next) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
+            return if (colon == null) null else try reply(allocator, me, from, typ, .{ .accepted = true, .commandId = id });
+        }
         if (colon == null) return null; // Fire-and-forget doesn't get a return value.
+        if (std.mem.eql(u8, base, "PROBEDIRECTFENCES")) return try reply(allocator, me, from, typ, .{ .accepted = @import("direct.zig").requestFenceProbe() });
+        if (std.mem.eql(u8, base, "GETDIRECTSTATE")) return try reply(allocator, me, from, typ, @import("direct.zig").snapshot());
+        if (std.mem.eql(u8, base, "GETCONTROLLERSTATE")) return try reply(allocator, me, from, typ, @import("controllers.zig").snapshot());
         if (std.mem.eql(u8, base, "ECHO")) return try reply(allocator, me, from, typ, payload);
         if (std.mem.eql(u8, base, "PING")) return try reply(allocator, me, from, typ, .{ .protocol = 1, .language = "zig" });
         if (std.mem.eql(u8, base, "HEALTH")) return try reply(allocator, me, from, typ, .{
@@ -70,7 +78,26 @@ pub const Actor = struct {
             .actorId = me,
             .name = "petplay_ovrdriver",
             .addressBookSize = 0,
-            .details = .{ .protocol = 1, .driverInitialized = state.initialized.load(.acquire), .standby = state.standby.load(.acquire), .runFrameCount = state.ticks.load(.monotonic), .processOwner = self.process_owner, .deviceSupport = "abi-probe-only", .ipcListening = state.ipc_listening.load(.acquire), .ipcConnected = state.ipc_connected.load(.acquire), .ipcSessions = state.ipc_sessions.load(.monotonic), .ipcFailed = state.ipc_failed.load(.acquire) },
+            .details = .{
+                .protocol = 1,
+                .driverInitialized = state.initialized.load(.acquire),
+                .standby = state.standby.load(.acquire),
+                .runFrameCount = state.ticks.load(.monotonic),
+                .processOwner = self.process_owner,
+                .deviceSupport = "synthetic-hmd-opt-in",
+                .syntheticHmdEnabled = @import("hmd.zig").enabled.load(.acquire),
+                .syntheticHmdActive = @import("hmd.zig").active.load(.acquire),
+                .syntheticHmdFailed = @import("hmd.zig").failed.load(.acquire),
+                .syntheticPoseUpdates = @import("hmd.zig").pose_updates.load(.monotonic),
+                .virtualPresents = @import("virtual_display.zig").presents.load(.monotonic),
+                .virtualTimingQueries = @import("virtual_display.zig").timing_queries.load(.monotonic),
+                .virtualWaits = @import("virtual_display.zig").waits.load(.monotonic),
+                .virtualBadPresentSize = @import("virtual_display.zig").bad_present_size.load(.acquire),
+                .ipcListening = state.ipc_listening.load(.acquire),
+                .ipcConnected = state.ipc_connected.load(.acquire),
+                .ipcSessions = state.ipc_sessions.load(.monotonic),
+                .ipcFailed = state.ipc_failed.load(.acquire),
+            },
         });
         return try reply(allocator, me, from, typ, .{ .__actorError = .{
             .message = "Unsupported native actor message",
@@ -125,4 +152,30 @@ fn makeId(buffer: *[64]u8) ![]const u8 {
         pos += 2;
     }
     return buffer[0..pos];
+}
+
+fn number(v: Value) !f64 {
+    return switch (v) {
+        .float => v.float,
+        .integer => @floatFromInt(v.integer),
+        else => error.ExpectedNumber,
+    };
+}
+fn parseMotion(payload: Value) !@import("motion.zig").Config {
+    if (payload != .object) return error.ExpectedMotionObject;
+    var config: @import("motion.zig").Config = .{};
+    const mode = try text(try field(payload, "mode"));
+    if (std.mem.eql(u8, mode, "stationary")) config.mode = .stationary else if (std.mem.eql(u8, mode, "sine")) config.mode = .sine else if (std.mem.eql(u8, mode, "sweep")) config.mode = .sweep else return error.InvalidMotionMode;
+    if (optionalField(payload, "frequencyHz")) |v| config.frequencyHz = try number(v);
+    if (optionalField(payload, "positionAmplitudeM")) |v| config.positionAmplitudeM = try number(v);
+    if (optionalField(payload, "yawAmplitudeRad")) |v| config.yawAmplitudeRad = try number(v);
+    for (payload.object.keys()) |key| {
+        if (!std.mem.eql(u8, key, "mode") and !std.mem.eql(u8, key, "frequencyHz") and
+            !std.mem.eql(u8, key, "positionAmplitudeM") and !std.mem.eql(u8, key, "yawAmplitudeRad")) return error.UnknownMotionField;
+    }
+    if (!config.valid()) return error.InvalidMotion;
+    return config;
+}
+fn commandError(a: std.mem.Allocator, from: []const u8, to: []const u8, typ: []const u8, message: []const u8) ![]u8 {
+    return reply(a, from, to, typ, .{ .__actorError = .{ .message = message, .event = "controller-command" } });
 }
