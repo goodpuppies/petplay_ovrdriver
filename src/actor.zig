@@ -8,7 +8,15 @@ pub const Actor = struct {
     id: [192]u8 = undefined,
     id_len: usize = 0,
     close_requested: bool = false,
+    allow_init: bool = true,
     process_owner: []const u8 = "standalone-probe",
+    pub fn establishIdentity(self: *Actor) !void {
+        var generated: [64]u8 = undefined;
+        const id = try makeId(&generated);
+        @memcpy(self.id[0..id.len], id);
+        self.id_len = id.len;
+        self.close_requested = false;
+    }
     pub fn dispatch(self: *Actor, allocator: std.mem.Allocator, input: []const u8) !?[]u8 {
         if (input.len > max_packet) return error.PacketTooLarge;
         const parsed = try std.json.parseFromSlice(Value, allocator, input, .{ .max_value_len = max_packet });
@@ -29,6 +37,7 @@ pub const Actor = struct {
         const colon = std.mem.indexOfScalar(u8, typ, ':');
         const base = typ[0 .. colon orelse typ.len];
         if (std.mem.eql(u8, base, "INIT")) {
+            if (!self.allow_init) return error.ExternallyOwnedActor;
             var generated: [64]u8 = undefined;
             const id = if (optionalField(payload, "actorId")) |value|
                 if (value == .null) try makeId(&generated) else try text(value)
@@ -61,7 +70,7 @@ pub const Actor = struct {
             .actorId = me,
             .name = "petplay_ovrdriver",
             .addressBookSize = 0,
-            .details = .{ .protocol = 1, .driverInitialized = state.initialized.load(.acquire), .standby = state.standby.load(.acquire), .runFrameCount = state.ticks.load(.monotonic), .processOwner = self.process_owner, .deviceSupport = "abi-probe-only" },
+            .details = .{ .protocol = 1, .driverInitialized = state.initialized.load(.acquire), .standby = state.standby.load(.acquire), .runFrameCount = state.ticks.load(.monotonic), .processOwner = self.process_owner, .deviceSupport = "abi-probe-only", .ipcListening = state.ipc_listening.load(.acquire), .ipcConnected = state.ipc_connected.load(.acquire), .ipcSessions = state.ipc_sessions.load(.monotonic), .ipcFailed = state.ipc_failed.load(.acquire) },
         });
         return try reply(allocator, me, from, typ, .{ .__actorError = .{
             .message = "Unsupported native actor message",

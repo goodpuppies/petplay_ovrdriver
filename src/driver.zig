@@ -1,6 +1,8 @@
 const std = @import("std");
 const abi = @import("abi.zig");
 const state = @import("state.zig");
+const ipc = @import("ipc.zig");
+pub var transport: ipc.Server = .{};
 const actor_mod = @import("actor.zig");
 var host: ?*abi.Host = null;
 var actor: actor_mod.Actor = .{ .process_owner = "steamvr" };
@@ -44,11 +46,16 @@ fn init(_: *abi.Provider, context: ?*abi.Context) callconv(.c) i32 {
     state.ticks.store(0, .monotonic);
     state.standby.store(false, .release);
     state.initialized.store(true, .release);
+    state.ipc_failed.store(false, .release);
+    transport.start() catch {
+        state.ipc_failed.store(true, .release);
+    };
     // Milestone 1: context/ABI only. No synthetic or physical device is registered yet.
     return 0;
 }
 fn cleanup(_: *abi.Provider) callconv(.c) void {
     state.initialized.store(false, .release);
+    transport.stop();
     state.standby.store(false, .release);
     state.handle.store(0, .release);
     host = null;

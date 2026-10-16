@@ -3,3 +3,7 @@ pub var initialized = std.atomic.Value(bool).init(false);
 pub var standby = std.atomic.Value(bool).init(false);
 pub var ticks = std.atomic.Value(u64).init(0);
 pub var handle = std.atomic.Value(u64).init(0);
+pub var ipc_listening = std.atomic.Value(bool).init(false);
+pub var ipc_connected = std.atomic.Value(bool).init(false);
+pub var ipc_sessions = std.atomic.Value(u64).init(0);
+pub var ipc_failed = std.atomic.Value(bool).init(false);

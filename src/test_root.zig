@@ -37,3 +37,9 @@ export fn pp_test_host_pose(index: u32) callconv(.c) void {
 export fn pp_test_host_add() callconv(.c) bool {
     return driver.testHostAdd();
 }
+export fn pp_test_set_directory(path: [*:0]const u8) callconv(.c) bool {
+    return driver.transport.setDirectory(@import("std").mem.span(path));
+}
+export fn pp_test_ipc_listening() callconv(.c) bool {
+    return state.ipc_listening.load(.acquire);
+}

@@ -1,7 +1,7 @@
 # petplay_ovrdriver
 
 Pure Zig OpenVR driver foundation for PetPlay's programmable VR test devices and future
-runtime integrations. Linux x86-64, Zig 0.16.0. Early milestone: no devices registered yet.
+runtime integrations. Linux x86-64, Zig 0.16.0. Native actor connection implemented; no devices registered yet.
 
 The shared library contains **no C++ adapter**. Zig exports `HmdDriverFactory` and explicitly
 implements the versioned OpenVR provider/device vtables. C++ appears only in the offline test
@@ -20,7 +20,7 @@ zig build test -Doptimize=ReleaseSafe
 Outputs:
 
 - `zig-out/petplay/bin/linux64/driver_petplay.so`: native driver shell, context initialization
-  and lifecycle only. It deliberately registers no tracked devices yet.
+  and lifecycle, plus a private Unix socket for attaching an existing-actor proxy. It deliberately registers no tracked devices yet.
 - `zig-out/petplay/driver.vrdrivermanifest`: inactive-by-default driver manifest.
 - `zig-out/bin/petplay_ovrdriver_actor`: standalone native actor for transport/protocol tests.
   This is **not** a replacement vrserver process or a loader for the driver.
@@ -43,9 +43,14 @@ an offline device DebugRequest. It does not prove runtime loading, HMD output or
 support. RTTI/dynamic_cast, inheritance beyond the declared interface objects, non-x86-64 Linux,
 and Windows are outside the verified contract. Unsupported driver targets fail at compile time.
 
+The live connection path uses the existing actor identity and does not send INIT/LOADED.
+See PetPlay's `classes/petplayOpenVrDriverProxy.ts`. The end-to-end test also attaches via the
+actual driver's Unix socket in an offline host, verifies state survives proxy removal, and
+checks provider Cleanup while a client is connected. SteamVR itself remains untested.
+
 The C++ test executable uses LLVM's linker because the installed native GCC 16 CRT's .sframe
-relocations are unsupported by Zig 0.16's default linker. Neither the driver nor native actor
-links libc/libc++; only the test consumer does.
+relocations are unsupported by Zig 0.16's default linker. The driver links libc/pthreads for threading inside a foreign host, and never libc++.
+The standalone native actor links neither runtime; the C++ test consumer links libc++.
 
 ## Repository integration
 

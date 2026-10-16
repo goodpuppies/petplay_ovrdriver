@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstddef>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 struct Host final : vr::IVRServerDriverHost {
  unsigned updates=0, additions=0; uint32_t index=0; vr::DriverPose_t pose{};
  bool TrackedDeviceAdded(const char *serial,vr::ETrackedDeviceClass cls,vr::ITrackedDeviceServerDriver *p) override {
@@ -33,7 +35,10 @@ struct Context final : vr::IVRDriverContext {
 };
 template<class T> T symbol(void *lib,const char *name) {void *p=dlsym(lib,name);assert(p);return reinterpret_cast<T>(p);}
 int main(int argc,char **argv) {
- assert(argc==2);void *lib=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL);if(!lib){std::puts(dlerror());return 1;}
+ assert(argc==2 || argc==4);void *lib=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL);if(!lib){std::puts(dlerror());return 1;}
+ char temporary[]="/tmp/petplay-driver-abi-XXXXXX";
+ const char *directory = argc==4 ? argv[3] : mkdtemp(temporary);assert(directory);
+ assert(symbol<bool(*)(const char*)>(lib,"pp_test_set_directory")(directory));
  auto factory=symbol<void*(*)(const char*,int*)>(lib,"HmdDriverFactory");
  int err=-1;assert(!factory(nullptr,&err)&&err==105);assert(!factory("unknown",&err)&&err==105);
  auto *p=static_cast<vr::IServerTrackedDeviceProvider*>(factory(vr::IServerTrackedDeviceProvider_Version,&err));assert(p&&err==0);
@@ -45,6 +50,15 @@ int main(int argc,char **argv) {
  ctx.available=true;assert(p->Init(&ctx)==0);assert(ctx.requests==2 && initialized());
  assert(symbol<uint64_t(*)()>(lib,"pp_test_handle")()==UINT64_C(0xfedcba9876543210));
  assert(p->Init(&ctx)==vr::VRInitError_Driver_Failed); // Duplicate lifecycle must not leak/reset context.
+ if(argc==4) {
+  if(!std::strcmp(argv[2],"--expect-no-ipc")) {
+   assert(!symbol<bool(*)()>(lib,"pp_test_ipc_listening")());p->Cleanup();dlclose(lib);std::puts("IPC_UNAVAILABLE");return 0;
+  }
+  assert(!std::strcmp(argv[2],"--serve"));assert(symbol<bool(*)()>(lib,"pp_test_ipc_listening")());
+  p->RunFrame();p->RunFrame();p->RunFrame();std::puts("READY");std::fflush(stdout);
+  assert(std::getchar()=='q');p->Cleanup();assert(!initialized());
+  std::puts("CLEANED");std::fflush(stdout);dlclose(lib);return 0;
+ }
  assert(!std::strcmp(p->GetInterfaceVersions()[0],vr::IServerTrackedDeviceProvider_Version));
  assert(!std::strcmp(p->GetInterfaceVersions()[1],vr::ITrackedDeviceServerDriver_Version));
  assert(p->GetInterfaceVersions()[3]==nullptr);
@@ -70,5 +84,5 @@ int main(int argc,char **argv) {
  char tiny[1]={'x'};device->DebugRequest("{}",tiny,1);assert(tiny[0]==0);device->DebugRequest("{}",tiny,0);
  p->Cleanup();assert(!initialized());p->RunFrame();assert(ticks()==3);
  assert(p->Init(&ctx)==0);assert(ticks()==0);p->Cleanup();
- dlclose(lib);std::puts("PASS pure Zig: provider/device virtual calls, reverse context/host calls, DriverPose_t return/layout, native actor dispatch, lifecycle");
+ std::filesystem::remove_all(directory);dlclose(lib);std::puts("PASS pure Zig: provider/device virtual calls, reverse context/host calls, DriverPose_t return/layout, native actor dispatch, lifecycle");
 }
