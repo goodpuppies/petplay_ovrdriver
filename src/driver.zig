@@ -58,6 +58,7 @@ fn init(_: *abi.Provider, context: ?*abi.Context) callconv(.c) i32 {
         };
     } else state.ipc_failed.store(true, .release);
     hmd.start(ctx, host.?);
+    if (!hmd.failed.load(.acquire)) @import("controllers.zig").start(ctx, host.?);
     return 0;
 }
 // Steam's container can have a private /run/user. An explicit shared-home path
@@ -77,6 +78,7 @@ fn configureTransport(ctx: *abi.Context) bool {
 fn cleanup(_: *abi.Provider) callconv(.c) void {
     state.initialized.store(false, .release);
     transport.stop();
+    @import("controllers.zig").stop();
     hmd.stop();
     state.standby.store(false, .release);
     state.handle.store(0, .release);

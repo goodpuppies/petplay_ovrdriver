@@ -76,10 +76,8 @@ pub fn start(ctx: *abi.Context, h: *abi.Host) void {
     direct.configure(ctx, h, err == 0 and use_direct);
     if (!h.vtable.trackedDeviceAdded(h, "PETPLAY-SYNTHETIC-HMD-001", 1, &device) or
         (!direct.enabled.load(.acquire) and !h.vtable.trackedDeviceAdded(h, "PETPLAY-SYNTHETIC-DISPLAY-001", 5, &redirect_device))) failed.store(true, .release);
-    if (!failed.load(.acquire)) @import("controllers.zig").start(ctx, h, properties.?, settings);
 }
 pub fn stop() void {
-    @import("controllers.zig").stop();
     deactivate(&device);
     direct.cleanup();
     host = null;
@@ -111,7 +109,8 @@ fn activate(_: *abi.Device, id: u32) callconv(.c) i32 {
         return abi.driver_failed;
     }
     if (direct.enabled.load(.acquire) and
-        (!setProperty(bool, 2043, 4, true) or !setProperty(bool, 2116, 4, true))) {
+        (!setProperty(bool, 2043, 4, true) or !setProperty(bool, 2116, 4, true)))
+    {
         failed.store(true, .release);
         return abi.driver_failed;
     }

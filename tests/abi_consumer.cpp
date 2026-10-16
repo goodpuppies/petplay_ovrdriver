@@ -232,6 +232,19 @@ int main(int argc,char **argv) {
  std::this_thread::sleep_for(std::chrono::milliseconds(12));assert(ctx.host.controllerUpdates[0]==leftCount);
  p->Cleanup();auto rightCount=ctx.host.controllerUpdates[1].load();std::this_thread::sleep_for(std::chrono::milliseconds(10));assert(ctx.host.controllerUpdates[1]==rightCount);
  ctx.settings.controllers=false;
+ // A physical HMD may own display and vsync while this provider supplies only hands.
+ ctx.settings.enabled=false;ctx.settings.controllers=true;
+ ctx.host.hmd=nullptr;ctx.host.redirect=nullptr;
+ auto beforeAdds=ctx.host.additions, beforeHmdUpdates=ctx.host.updates.load(), beforeVsync=ctx.host.vsyncs.load();
+ auto beforeHands=ctx.host.controllerUpdates[1].load();
+ assert(p->Init(&ctx)==0);assert(!p->ShouldBlockStandbyMode());
+ std::this_thread::sleep_for(std::chrono::milliseconds(20));
+ assert(ctx.host.additions==beforeAdds+2 && !ctx.host.hmd && !ctx.host.redirect);
+ assert(ctx.host.updates==beforeHmdUpdates && ctx.host.vsyncs==beforeVsync);
+ assert(ctx.host.controllerUpdates[1]>beforeHands);
+ p->Cleanup();beforeHands=ctx.host.controllerUpdates[1].load();
+ std::this_thread::sleep_for(std::chrono::milliseconds(12));assert(ctx.host.controllerUpdates[1]==beforeHands);
+ ctx.settings.enabled=true;ctx.settings.controllers=false;
  auto fenceLayout=symbol<size_t(*)(uint32_t)>(lib,"pp_test_fence_layout");
  assert(fenceLayout(0)==sizeof(dma_buf_export_sync_file) && fenceLayout(1)==sizeof(sync_file_info) && fenceLayout(2)==sizeof(sync_fence_info) && fenceLayout(3)==offsetof(sync_file_info,sync_fence_info));
  // Driver-direct ABI and real allocation protocol, including rollback and resource retry.

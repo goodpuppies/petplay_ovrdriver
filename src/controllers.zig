@@ -43,10 +43,18 @@ const table: abi.Table(abi.DeviceMethods) = .{ .methods = .{
     .getPose = getPose,
 } };
 const serials = [_][:0]const u8{ "PETPLAY-SYNTHETIC-LEFT-001", "PETPLAY-SYNTHETIC-RIGHT-001" };
-pub fn start(ctx: *abi.Context, h: *abi.Host, p: *abi.Properties, settings: *abi.Settings) void {
+pub fn start(ctx: *abi.Context, h: *abi.Host) void {
     var err: i32 = 0;
     failed.store(false, .release);
+    const settings_raw = ctx.vtable.getGenericInterface(ctx, abi.settings_version, &err) orelse return;
+    if (err != 0) return;
+    const settings: *abi.Settings = @ptrCast(@alignCast(settings_raw));
     if (!settings.vtable.getBool(settings, "driver_petplay", "syntheticControllers", &err) or err != 0) return;
+    const props_raw = ctx.vtable.getGenericInterface(ctx, abi.properties_version, &err);
+    if (err != 0 or props_raw == null) {
+        failed.store(true, .release);
+        return;
+    }
     const raw = ctx.vtable.getGenericInterface(ctx, abi.input_version, &err);
     if (err != 0 or raw == null) {
         failed.store(true, .release);
@@ -54,7 +62,7 @@ pub fn start(ctx: *abi.Context, h: *abi.Host, p: *abi.Properties, settings: *abi
     }
     std.Io.Threaded.mutexLock(&mutex);
     host = h;
-    properties = p;
+    properties = @ptrCast(@alignCast(props_raw.?));
     input = @ptrCast(@alignCast(raw.?));
     config = .{};
     epoch_ns = clock.nowNs();

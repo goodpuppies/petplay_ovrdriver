@@ -6,7 +6,12 @@ pub const Config = struct {
     frequencyHz: f64 = 0.7,
     positionAmplitudeM: f64 = 0.12,
     yawAmplitudeRad: f64 = 0.4,
+    // Fixed placement in runtime raw tracking space, independent of head motion.
+    worldTranslationM: [3]f64 = @splat(0),
+    worldYawRad: f64 = 0,
     pub fn valid(self: Config) bool {
+        for (self.worldTranslationM) |v| if (!std.math.isFinite(v) or @abs(v) > 100) return false;
+        if (!std.math.isFinite(self.worldYawRad) or @abs(self.worldYawRad) > std.math.pi) return false;
         return std.math.isFinite(self.frequencyHz) and self.frequencyHz > 0 and self.frequencyHz <= 5 and
             std.math.isFinite(self.positionAmplitudeM) and self.positionAmplitudeM >= 0 and self.positionAmplitudeM <= 1 and
             std.math.isFinite(self.yawAmplitudeRad) and self.yawAmplitudeRad >= 0 and self.yawAmplitudeRad <= std.math.pi;
@@ -45,7 +50,11 @@ pub fn sweep(frequency_hz: f64, seconds: f64, hand: usize) Sweep {
     return .{ .value = direction * (2 * distance / (1 - ramp) - 1), .velocity = direction * 2 / (1 - ramp) * speed * rate, .acceleration = direction * 2 / (1 - ramp) * acceleration * rate * rate, .constant_speed = t >= ramp and t <= 1 - ramp, .direction = direction };
 }
 pub fn evaluate(config: Config, hand: usize, seconds: f64) abi.Pose {
-    var pose: abi.Pose = .{ .vecPosition = .{ if (hand == 0) -0.25 else 0.25, 1.2, -0.5 } };
+    var pose: abi.Pose = .{
+        .vecPosition = .{ if (hand == 0) -0.25 else 0.25, 1.2, -0.5 },
+        .vecWorldFromDriverTranslation = config.worldTranslationM,
+        .qWorldFromDriverRotation = .{ .w = @cos(config.worldYawRad / 2), .y = @sin(config.worldYawRad / 2) },
+    };
     if (config.mode == .stationary) return pose;
     if (config.mode == .sweep) {
         const point = sweep(config.frequencyHz, seconds, hand);
@@ -106,4 +115,16 @@ test "sweep has constant-rate opposite legs, smooth reversals and analytic deriv
         try std.testing.expectApproxEqAbs(@as(f64, 0), sweep(frequency, t, 0).velocity, 1e-10);
         try std.testing.expectApproxEqAbs(sweep(frequency, t - dt, 0).value, sweep(frequency, t + dt, 0).value, 1e-10);
     }
+}
+
+test "fixed room placement preserves analytic local motion and rejects invalid transforms" {
+    const c: Config = .{ .mode = .sweep, .worldTranslationM = .{ 2, -1, 3 }, .worldYawRad = 1.2 };
+    const p = evaluate(c, 0, 0.7);
+    const local = evaluate(.{ .mode = .sweep }, 0, 0.7);
+    try std.testing.expectEqual(local.vecPosition, p.vecPosition);
+    try std.testing.expectEqual(local.vecVelocity, p.vecVelocity);
+    try std.testing.expectEqual(c.worldTranslationM, p.vecWorldFromDriverTranslation);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.2), 2 * std.math.atan2(p.qWorldFromDriverRotation.y, p.qWorldFromDriverRotation.w), 1e-12);
+    try std.testing.expect(!Config.valid(.{ .worldYawRad = std.math.nan(f64) }));
+    try std.testing.expect(!Config.valid(.{ .worldTranslationM = .{ 0, std.math.inf(f64), 0 } }));
 }

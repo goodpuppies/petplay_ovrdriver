@@ -84,7 +84,7 @@ pub const Actor = struct {
                 .standby = state.standby.load(.acquire),
                 .runFrameCount = state.ticks.load(.monotonic),
                 .processOwner = self.process_owner,
-                .deviceSupport = "synthetic-hmd-opt-in",
+                .deviceSupport = "independent-opt-in-hmd-and-controllers",
                 .syntheticHmdEnabled = @import("hmd.zig").enabled.load(.acquire),
                 .syntheticHmdActive = @import("hmd.zig").active.load(.acquire),
                 .syntheticHmdFailed = @import("hmd.zig").failed.load(.acquire),
@@ -169,9 +169,15 @@ fn parseMotion(payload: Value) !@import("motion.zig").Config {
     if (optionalField(payload, "frequencyHz")) |v| config.frequencyHz = try number(v);
     if (optionalField(payload, "positionAmplitudeM")) |v| config.positionAmplitudeM = try number(v);
     if (optionalField(payload, "yawAmplitudeRad")) |v| config.yawAmplitudeRad = try number(v);
+    if (optionalField(payload, "worldYawRad")) |v| config.worldYawRad = try number(v);
+    if (optionalField(payload, "worldTranslationM")) |v| {
+        if (v != .array or v.array.items.len != 3) return error.ExpectedTranslationVector;
+        for (v.array.items, 0..) |item, i| config.worldTranslationM[i] = try number(item);
+    }
     for (payload.object.keys()) |key| {
         if (!std.mem.eql(u8, key, "mode") and !std.mem.eql(u8, key, "frequencyHz") and
-            !std.mem.eql(u8, key, "positionAmplitudeM") and !std.mem.eql(u8, key, "yawAmplitudeRad")) return error.UnknownMotionField;
+            !std.mem.eql(u8, key, "positionAmplitudeM") and !std.mem.eql(u8, key, "yawAmplitudeRad") and
+            !std.mem.eql(u8, key, "worldYawRad") and !std.mem.eql(u8, key, "worldTranslationM")) return error.UnknownMotionField;
     }
     if (!config.valid()) return error.InvalidMotion;
     return config;

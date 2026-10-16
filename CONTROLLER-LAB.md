@@ -131,3 +131,44 @@ clock do not reproduce every physical controller, headset or runtime timing beha
 
 `mode: "sweep"` now supplies constant-speed legs with smooth reversals and analytic derivatives.
 See [WRIST-SWEEP.md](WRIST-SWEEP.md) for the full-scene controller/wrist phase experiment.
+
+## Real headset with synthetic controllers
+
+Controllers now opt in independently of `syntheticHmd`. A controller-only provider
+registers no HMD or display, emits no display clock, and does not block standby.
+This lets the physical headset retain its own optics, refresh timing and Linux
+async reprojection while the hands follow the same analytic test trajectory.
+
+From the parent checkout, with SteamVR stopped:
+
+```sh
+python3 utils/petplay-ovrdriver-lab.py run --real-hmd --seconds 3600
+# In another terminal, with the headset tracking and physical controllers off:
+deno run -A --no-check utils/petplay-ovrdriver-hybrid-probe.ts --sweep
+```
+
+The scoped launcher preserves existing external drivers, physical driver settings,
+power settings and display settings. It adds a controller-only manifest with
+`alwaysActivate: true` and `redirectsDisplay: false`, enables multiple drivers,
+and restores the original configuration bytes when the session ends. Interrupted
+sessions use the same `recover` command as the synthetic lab.
+
+`--sweep` places the test rig once relative to the current raw headset pose:
+hands roughly 40 cm below and 50 cm forward, with a horizontal 24 cm sweep.
+It checks that both hand roles belong to the synthetic controllers. The rig then
+stays in world space; it does not follow subsequent head movement. Re-run to
+reposition. `--place` performs the same placement with stationary hands.
+The motion command's `worldTranslationM` and `worldYawRad` specify this fixed
+raw-space transform; the driver retains analytic local velocities and accelerations.
+
+Start with a still-head panorama/projection comparison, then repeat with head
+movement, and finally with VRChat home and a visible desktop overlay. Record
+headset feedback separately from image measurements. The existing synthetic
+960×960 GPU capture and fixed-head analyzer do **not** automatically apply to the
+real headset's compositor targets or moving camera.
+
+For in-person comparisons, `--hold` stops motion without changing the rig's
+placement, and `--resume` resumes a sweep at that placement. Add `--fast` to
+`--resume` for a 1 Hz, ±20 cm sweep (about 0.89 m/s in each constant-speed leg,
+versus 0.19 m/s for the original sweep). These affect controller motion only;
+PetPlay's presentation and full layout visibility are controlled separately.

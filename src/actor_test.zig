@@ -46,6 +46,12 @@ test "controller commands reject unknown fields and remain inert when disabled" 
         ,
         \\{"mode":"sine","frequncyHz":1}
         ,
+        \\{"mode":"sine","worldTranslationM":[0,1]}
+        ,
+        \\{"mode":"sine","worldTranslationM":[0,101,0]}
+        ,
+        \\{"mode":"sine","worldYawRad":4}
+        ,
         \\{"mode":"other"}
     }) |payload| {
         const packet = try std.fmt.allocPrint(a, "{{\"kind\":\"message\",\"data\":{{\"address\":{{\"fm\":\"test@x\",\"to\":\"driver@00000000-0000-0000-0000-000000000001\"}},\"type\":\"SETCONTROLLERMOTION:test\",\"payload\":{s}}}}}", .{payload});
