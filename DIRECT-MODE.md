@@ -117,9 +117,40 @@ local FDs are closed and the ledger clears, but the runtime's teardown/reference
 not established. This is recorded as `releaseFailures`, not hidden or labelled successful
 balanced live release. Audit that ownership before making this a long-running capture backend.
 
+## Lab reader: every layer of a presented frame (2026-10-18)
+
+`CAPTUREDIRECTFRAME {directory}` reads back **all** layers of the next presented frame,
+whichever process rendered them, for lab inspection (PetPlay's `deno task vrlab eye`). It is
+`src/direct_reader.zig`, following ALVR's Linux import (`Renderer.cpp`, ALVR
+`ebec107b7e5f81677fb9c631d239daf2110bf573`):
+
+- **Import:** a private Vulkan 1.1 device on the GPU (loader opened at runtime). Each swap
+  image's stored fd is duplicated and imported as an opaque fd, with a dedicated allocation and
+  the allocation's own create info: format, MUTABLE_FORMAT, TRANSFER_SRC | SAMPLED |
+  INPUT_ATTACHMENT, optimal tiling, no format list.
+- **No layout transition**, unlike ALVR: a GENERAL→GENERAL memory barrier, then a copy to a
+  host-coherent buffer. An initial-layout transition could rewrite compression metadata in
+  memory that the producer still owns.
+- **Timing:** ALVR's guard, not a completion contract. Wait for the next Present, take that
+  frame's layers, sleep 4 ms, then copy. The three-image ring means the copied images are not
+  rewritten for about two frames, but a torn or early image is possible. Use it for static
+  inspection, not for timing or motion measurements.
+- **Output:** `<directory>/<present>-<texture>.rgba` (width × height × 4 bytes, in the image's
+  channel order). The reply lists the layers in submission order, each with both eyes' files,
+  sizes, VkFormat and SubmitLayer bounds. A texture shared by both eyes is read once.
+
+Verified with VRChat in a world plus PetPlay. Each frame had two layers: VRChat's 640×640 scene
+(format 43, allocated for the VRChat process, so the compositor-side capture layer cannot see
+it), then the compositor's 960×960 overlay layer, which keeps alpha. While the scene app is not
+yet presenting, a frame has a single layer: SteamVR's own loading scene, with overlays drawn in.
+
+PetPlay merges them the way ALVR/ALXR's Windows FrameRender does: clear to black, then layers in
+order, each sampled through its bounds. Layer 0 is opaque (its alpha ignored); later layers use
+straight alpha (`SRC_ALPHA, INV_SRC_ALPHA`).
+
 ## External reader still pending
 
-First establish the producer completion and resource lifetime contract. Linux currently
+The lab reader above is a diagnostic, not this production reader. First establish the producer completion and resource lifetime contract. Linux currently
 passes a zero syncTexture. A Present callback, WaitFrameSync wake, mirror lock or arbitrary
 sleep must not be promoted to a producer GPU-completion fence. ALVR's current implementation
 has its own writer-fence/guard-delay workarounds; those are useful references, not a proven

@@ -1,10 +1,11 @@
-//! Opt-in Linux driver-direct diagnostic. Real runtime-allocated images; no GPU reader yet.
+//! Opt-in Linux driver-direct diagnostic. Real runtime-allocated images; `captureFrame` reads them back for the lab.
 //! ALVR is an architectural reference, not a linked dependency or copied implementation.
 const std = @import("std");
 const abi = @import("abi.zig");
 const clock = @import("virtual_display.zig");
 const linux = std.os.linux;
 const fence_probe = @import("fence_probe.zig");
+const reader = @import("direct_reader.zig");
 var fence_budget: u32 = 0;
 pub var enabled = std.atomic.Value(bool).init(false);
 var ctx: ?*abi.Context = null;
@@ -25,6 +26,12 @@ const Set = struct {
 };
 var sets: [max_sets]Set = @splat(.{});
 var layers_in_frame: u32 = 0;
+/// Every layer of the frame being submitted and of the last presented one, for `captureFrame`.
+const max_layers = 8;
+const FrameLayer = struct { textures: [2]u64 = @splat(0), bounds: [2][4]f32 = @splat(@splat(0)) };
+var building: [max_layers]FrameLayer = @splat(.{});
+var presented: [max_layers]FrameLayer = @splat(.{});
+var presented_count: u32 = 0;
 var stats: Stats = .{};
 pub const Stats = struct {
     createCalls: u64 = 0,
@@ -115,6 +122,8 @@ pub fn cleanup() void {
     std.Io.Threaded.mutexLock(&mutex);
     defer std.Io.Threaded.mutexUnlock(&mutex);
     for (&sets) |*set| release(set);
+    presented_count = 0;
+    reader.deinit();
     log("PetPlay direct cleanup: creates={d} allocated={d} failures={d} unavailable={d} submits={d} presents={d} posts={d} layers={d} unknown={d} releaseFailures={d}", .{ stats.createCalls, stats.allocatedSets, stats.allocationFailures, stats.resourceUnavailable, stats.submitCalls, stats.presentCalls, stats.postPresentCalls, stats.maxLayerCount, stats.unknownTextures, stats.releaseFailures });
     resources = null;
     ctx = null;
@@ -275,6 +284,7 @@ fn submit(_: *abi.Direct, eyes: *const [2]abi.LayerEye) callconv(.c) void {
     stats.submitCalls += 1;
     layers_in_frame +|= 1;
     stats.lastEyes = .{ eyes[0].texture, eyes[1].texture };
+    if (layers_in_frame <= max_layers) building[layers_in_frame - 1] = .{ .textures = .{ eyes[0].texture, eyes[1].texture }, .bounds = .{ eyes[0].bounds, eyes[1].bounds } };
     for (eyes) |eye| if (find(eye.texture) == null) {
         stats.unknownTextures += 1;
     };
@@ -287,6 +297,8 @@ fn present(_: *abi.Direct, sync: u64) callconv(.c) void {
     stats.lastLayerCount = layers_in_frame;
     stats.maxLayerCount = @max(stats.maxLayerCount, layers_in_frame);
     stats.lastSyncTexture = sync;
+    presented = building;
+    presented_count = @min(layers_in_frame, max_layers);
     layers_in_frame = 0;
     if (fence_budget > 0) {
         fence_budget -= 1;
@@ -327,4 +339,81 @@ fn timing(_: *abi.Direct, t: *abi.DirectTiming) callconv(.c) void {
     t.mispresented = 0;
     t.dropped = 0;
     t.flags = 0;
+}
+
+fn presentCount() u64 {
+    std.Io.Threaded.mutexLock(&mutex);
+    defer std.Io.Threaded.mutexUnlock(&mutex);
+    return stats.presentCalls;
+}
+pub const CapturedEye = struct { file: []const u8, width: u32, height: u32, format: u32, bounds: [4]f32 };
+pub const Capture = struct { present: u64, layers: []const [2]CapturedEye };
+
+/// Reads every layer of the next presented frame into `<directory>/<present>-<texture>.rgba`
+/// (width × height × 4 bytes in the image's channel order), layers in submission order.
+/// Like ALVR, it takes the frame at Present and then waits a short guard for its writes.
+pub fn captureFrame(a: std.mem.Allocator, directory: []const u8) !Capture {
+    if (!enabled.load(.acquire)) return error.DriverDirectDisabled;
+    const path = try a.dupeZ(u8, directory);
+    const raw_dir = linux.openat(linux.AT.FDCWD, path, .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.errno(raw_dir) != .SUCCESS) return error.CaptureDirectoryUnavailable;
+    const dir: i32 = @intCast(raw_dir);
+    defer _ = linux.close(dir);
+
+    const start = presentCount();
+    const deadline = clock.nowNs() + 500_000_000;
+    while (presentCount() == start) {
+        if (clock.nowNs() > deadline) return error.NoPresent;
+        sleepUntil(clock.nowNs() + 1_000_000);
+    }
+    sleepUntil(clock.nowNs() + 4_000_000);
+
+    const Pending = struct { texture: u64, source: ?reader.Source, bounds: [4]f32, desc: abi.SwapDesc };
+    var pending: [max_layers][2]Pending = undefined;
+    var count: usize = 0;
+    var frame: u64 = 0;
+    {
+        std.Io.Threaded.mutexLock(&mutex);
+        defer std.Io.Threaded.mutexUnlock(&mutex);
+        frame = stats.presentCalls;
+        count = presented_count;
+        for (presented[0..count], 0..) |layer, l| for (layer.textures, 0..) |texture, e| {
+            pending[l][e] = .{ .texture = texture, .source = null, .bounds = layer.bounds[e], .desc = .{ .width = 0, .height = 0, .format = 0, .samples = 0 } };
+            const set = find(texture) orelse continue;
+            for (set.handles, 0..) |h, i| if (h == texture) {
+                const dup = linux.fcntl(set.fds[i], linux.F.DUPFD_CLOEXEC, 0);
+                if (linux.errno(dup) != .SUCCESS) break;
+                pending[l][e].source = .{ .fd = @intCast(dup), .width = set.desc.width, .height = set.desc.height, .format = set.desc.format };
+                pending[l][e].desc = set.desc;
+                break;
+            };
+        };
+    }
+    defer for (pending[0..count]) |layer| for (layer) |eye| if (eye.source) |s| {
+        if (s.fd >= 0) _ = linux.close(s.fd);
+    };
+
+    const layers = try a.alloc([2]CapturedEye, count);
+    for (pending[0..count], 0..) |*layer, l| for (layer, 0..) |*eye, e| {
+        const name = try std.fmt.allocPrint(a, "{d}-{x}.rgba", .{ frame, eye.texture });
+        layers[l][e] = .{ .file = name, .width = eye.desc.width, .height = eye.desc.height, .format = eye.desc.format, .bounds = eye.bounds };
+        // Both eyes may share one texture (side by side, split by bounds): read it once.
+        if (e == 1 and layer[0].texture == eye.texture) continue;
+        const source = eye.source orelse return error.UnknownTexture;
+        eye.source = null; // read() consumes the duplicate fd.
+        const pixels = try a.alloc(u8, @as(usize, source.width) * source.height * 4);
+        try reader.read(source, pixels);
+        const raw = linux.openat(dir, try a.dupeZ(u8, name), .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
+        if (linux.errno(raw) != .SUCCESS) return error.OutputExistsOrUnavailable;
+        const fd: i32 = @intCast(raw);
+        defer _ = linux.close(fd);
+        var offset: usize = 0;
+        while (offset < pixels.len) {
+            const n = linux.write(fd, pixels[offset..].ptr, pixels.len - offset);
+            if (linux.errno(n) == .INTR) continue;
+            if (linux.errno(n) != .SUCCESS or n == 0) return error.WriteFailure;
+            offset += n;
+        }
+    };
+    return .{ .present = frame, .layers = layers };
 }

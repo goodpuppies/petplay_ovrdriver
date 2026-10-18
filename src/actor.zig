@@ -82,6 +82,11 @@ pub const Actor = struct {
         if (colon == null) return null; // Fire-and-forget doesn't get a return value.
         if (std.mem.eql(u8, base, "PROBEDIRECTFENCES")) return try reply(allocator, me, from, typ, .{ .accepted = @import("direct.zig").requestFenceProbe() });
         if (std.mem.eql(u8, base, "GETDIRECTSTATE")) return try reply(allocator, me, from, typ, @import("direct.zig").snapshot());
+        if (std.mem.eql(u8, base, "CAPTUREDIRECTFRAME")) {
+            const directory = parseCaptureDirectory(payload) catch |err| return try commandError(allocator, me, from, typ, @errorName(err));
+            const capture = @import("direct.zig").captureFrame(allocator, directory) catch |err| return try commandError(allocator, me, from, typ, @errorName(err));
+            return try reply(allocator, me, from, typ, capture);
+        }
         if (std.mem.eql(u8, base, "GETCONTROLLERSTATE")) return try reply(allocator, me, from, typ, @import("controllers.zig").snapshot());
         if (std.mem.eql(u8, base, "ECHO")) return try reply(allocator, me, from, typ, payload);
         if (std.mem.eql(u8, base, "PING")) return try reply(allocator, me, from, typ, .{ .protocol = 1, .language = "zig" });
@@ -217,6 +222,14 @@ fn rejectUnknown(payload: Value, comptime allowed: []const []const u8) !void {
         inline for (allowed) |name| if (std.mem.eql(u8, key, name)) continue :outer;
         return error.UnknownField;
     }
+}
+/// `{directory}`: an existing absolute directory for CAPTUREDIRECTFRAME's image files.
+fn parseCaptureDirectory(payload: Value) ![]const u8 {
+    if (payload != .object) return error.ExpectedCaptureObject;
+    try rejectUnknown(payload, &.{"directory"});
+    const directory = try text(try field(payload, "directory"));
+    if (directory.len == 0 or directory[0] != '/' or directory.len > 1024) return error.ExpectedAbsoluteDirectory;
+    return directory;
 }
 /// `{hand, position:[x,y,z], rotation:[x,y,z,w]}` holds a hand; `{hand, clear:true}` releases it.
 fn parsePose(payload: Value) !struct { hand: usize, pose: ?@import("controllers.zig").HeldPose } {
