@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
     b.installFile("driver.vrdrivermanifest", "petplay/driver.vrdrivermanifest");
     b.installFile("resources/settings/default.vrsettings", "petplay/resources/settings/default.vrsettings");
     b.installFile("resources/input/synthetic_controller_profile.json", "petplay/resources/input/synthetic_controller_profile.json");
+    b.installFile("resources/input/touch_emulation_profile.json", "petplay/resources/input/touch_emulation_profile.json");
     const capture = b.addLibrary(.{ .name = "petplay_capture", .linkage = .dynamic, .root_module = b.createModule(.{ .root_source_file = b.path("src/capture_layer.zig"), .target = target, .optimize = optimize, .link_libc = true }) });
     capture.root_module.addIncludePath(b.path("vendor/vulkan"));
     const capture_install = b.addInstallArtifact(capture, .{});

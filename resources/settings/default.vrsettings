@@ -4,6 +4,7 @@
     "syntheticHmd": false,
     "driverDirect": false,
     "socketDirectory": "",
-    "syntheticControllers": false
+    "syntheticControllers": false,
+    "syntheticControllerType": "petplay_synthetic"
   }
 }

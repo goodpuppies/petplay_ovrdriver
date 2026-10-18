@@ -66,3 +66,30 @@ test "controller commands reject unknown fields and remain inert when disabled" 
     defer a.free(response);
     try std.testing.expect(std.mem.indexOf(u8, response, "ControllersDisabled") != null);
 }
+
+test "held poses and scripted inputs validate their payloads" {
+    var actor: native.Actor = .{};
+    try init(&actor);
+    for ([_][]const u8{
+        \\"SETCONTROLLERPOSE:t","payload":{"hand":"middle","position":[0,1,0],"rotation":[0,0,0,1]}
+        ,
+        \\"SETCONTROLLERPOSE:t","payload":{"hand":"left","position":[0,1],"rotation":[0,0,0,1]}
+        ,
+        \\"SETCONTROLLERPOSE:t","payload":{"hand":"left","position":[0,1,0],"rotation":[0,0,0,0]}
+        ,
+        \\"SETCONTROLLERPOSE:t","payload":{"hand":"left","position":[0,1,0],"rotation":[0,0,0,1],"speed":2}
+        ,
+        \\"SETCONTROLLERINPUT:t","payload":{"hand":"right","grip":1.5}
+        ,
+        \\"SETCONTROLLERINPUT:t","payload":{"hand":"right","a":1}
+        ,
+        // Valid, but the controllers are not running in this test.
+        \\"SETCONTROLLERINPUT:t","payload":{"hand":"right","grip":1,"joystick":[0,-1]}
+    }) |body| {
+        const packet = try std.fmt.allocPrint(a, "{{\"kind\":\"message\",\"data\":{{\"address\":{{\"fm\":\"test@x\",\"to\":\"driver@00000000-0000-0000-0000-000000000001\"}},\"type\":{s}}}}}", .{body});
+        defer a.free(packet);
+        const response = (try actor.dispatch(a, packet)).?;
+        defer a.free(response);
+        try std.testing.expect(std.mem.indexOf(u8, response, "__actorError") != null);
+    }
+}

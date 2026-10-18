@@ -46,6 +46,22 @@ about Y. Right-hand phase is π/2 ahead of left. Position, orientation, linear/a
 and acceleration come from the same analytic definition at CLOCK_MONOTONIC sample time.
 `poseTimeOffset` accounts for evaluation-to-submission time. This never reuses an IR timestamp.
 
+Two more commands script a hand directly; both apply immediately rather than through the queue:
+
+```ts
+// Hold one hand at an exact pose (tracking space, XYZW); {hand, clear: true} returns it to the trajectory.
+await postal.PostMessage({ target: id, type: "SETCONTROLLERPOSE",
+  payload: { hand: "right", position: [0.1, 1.4, -0.35], rotation: [0, 0, 0, 1] } }, true);
+// The complete input state for one hand; omitted controls are released.
+await postal.PostMessage({ target: id, type: "SETCONTROLLERINPUT",
+  payload: { hand: "left", trigger: 1, grip: 0, joystick: [-0.8, 0.6], a: false, b: false, system: false } }, true);
+```
+
+`a`/`b` are A/B on the right hand and X/Y on the left. With `driver_petplay.syntheticControllerType`
+set to `"oculus_touch"` (the lab's `--touch-controllers`), the controllers present Touch input paths
+and controller type, so applications' own Touch bindings apply: VRChat's grab, menus and Action Menu
+work unmodified. The default `petplay_synthetic` profile still exposes only the trigger.
+
 A separate native worker samples on an absolute 250 Hz grid, skipping missed slots. No JSON,
 allocation or per-frame PetPlay message is needed there. State snapshots expose the applied
 configuration/epoch, active device indices, sample and submission timestamps, published poses,

@@ -33,7 +33,7 @@ struct Settings final : vr::IVRSettings {
  int32_t GetInt32(const char*,const char*,vr::EVRSettingsError*) override { assert(false);return 0; }
  float GetFloat(const char*,const char*,vr::EVRSettingsError*) override { assert(false);return 0; }
  void GetString(const char *section,const char *key,char *out,uint32_t size,vr::EVRSettingsError *err) override {
-  assert(!std::strcmp(section,"driver_petplay") && !std::strcmp(key,"socketDirectory") && size>0);
+  assert(!std::strcmp(section,"driver_petplay") && (!std::strcmp(key,"socketDirectory") || !std::strcmp(key,"syntheticControllerType")) && size>0);
   out[0]=0;if(err)*err=vr::VRSettingsError_None;
  }
  void RemoveSection(const char*,vr::EVRSettingsError*) override { assert(false); }

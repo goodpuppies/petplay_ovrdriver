@@ -67,6 +67,18 @@ pub const Actor = struct {
             const id = @import("controllers.zig").enqueue(next) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
             return if (colon == null) null else try reply(allocator, me, from, typ, .{ .accepted = true, .commandId = id });
         }
+        if (std.mem.eql(u8, base, "SETCONTROLLERPOSE")) {
+            const controllers = @import("controllers.zig");
+            const parsed_pose = parsePose(payload) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
+            controllers.hold(parsed_pose.hand, parsed_pose.pose) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
+            return if (colon == null) null else try reply(allocator, me, from, typ, .{ .accepted = true });
+        }
+        if (std.mem.eql(u8, base, "SETCONTROLLERINPUT")) {
+            const controllers = @import("controllers.zig");
+            const parsed_input = parseInput(payload) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
+            controllers.setInput(parsed_input.hand, parsed_input.state) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
+            return if (colon == null) null else try reply(allocator, me, from, typ, .{ .accepted = true });
+        }
         if (colon == null) return null; // Fire-and-forget doesn't get a return value.
         if (std.mem.eql(u8, base, "PROBEDIRECTFENCES")) return try reply(allocator, me, from, typ, .{ .accepted = @import("direct.zig").requestFenceProbe() });
         if (std.mem.eql(u8, base, "GETDIRECTSTATE")) return try reply(allocator, me, from, typ, @import("direct.zig").snapshot());
@@ -184,4 +196,63 @@ fn parseMotion(payload: Value) !@import("motion.zig").Config {
 }
 fn commandError(a: std.mem.Allocator, from: []const u8, to: []const u8, typ: []const u8, message: []const u8) ![]u8 {
     return reply(a, from, to, typ, .{ .__actorError = .{ .message = message, .event = "controller-command" } });
+}
+fn parseHand(payload: Value) !usize {
+    const hand = try text(try field(payload, "hand"));
+    if (std.mem.eql(u8, hand, "left")) return 0;
+    if (std.mem.eql(u8, hand, "right")) return 1;
+    return error.InvalidHand;
+}
+fn finiteVector(comptime n: usize, v: Value, limit: f64) ![n]f64 {
+    if (v != .array or v.array.items.len != n) return error.ExpectedVector;
+    var out: [n]f64 = undefined;
+    for (v.array.items, 0..) |item, i| {
+        out[i] = try number(item);
+        if (!std.math.isFinite(out[i]) or @abs(out[i]) > limit) return error.InvalidVector;
+    }
+    return out;
+}
+fn rejectUnknown(payload: Value, comptime allowed: []const []const u8) !void {
+    outer: for (payload.object.keys()) |key| {
+        inline for (allowed) |name| if (std.mem.eql(u8, key, name)) continue :outer;
+        return error.UnknownField;
+    }
+}
+/// `{hand, position:[x,y,z], rotation:[x,y,z,w]}` holds a hand; `{hand, clear:true}` releases it.
+fn parsePose(payload: Value) !struct { hand: usize, pose: ?@import("controllers.zig").HeldPose } {
+    if (payload != .object) return error.ExpectedPoseObject;
+    try rejectUnknown(payload, &.{ "hand", "position", "rotation", "clear" });
+    const hand = try parseHand(payload);
+    if (optionalField(payload, "clear")) |v| if (v == .bool and v.bool) return .{ .hand = hand, .pose = null };
+    const position = try finiteVector(3, try field(payload, "position"), 100);
+    const q = try finiteVector(4, try field(payload, "rotation"), 2);
+    const length = @sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (length < 0.5) return error.InvalidRotation;
+    return .{ .hand = hand, .pose = .{ .position = position, .rotation = .{ .x = q[0] / length, .y = q[1] / length, .z = q[2] / length, .w = q[3] / length } } };
+}
+/// The complete input state for one hand; omitted controls are released.
+fn parseInput(payload: Value) !struct { hand: usize, state: @import("controllers.zig").InputState } {
+    if (payload != .object) return error.ExpectedInputObject;
+    try rejectUnknown(payload, &.{ "hand", "trigger", "grip", "joystick", "joystickClick", "a", "b", "system" });
+    var state_out: @import("controllers.zig").InputState = .{};
+    const hand = try parseHand(payload);
+    if (optionalField(payload, "trigger")) |v| state_out.trigger = try unit(v, 0);
+    if (optionalField(payload, "grip")) |v| state_out.grip = try unit(v, 0);
+    if (optionalField(payload, "joystick")) |v| {
+        const axes = try finiteVector(2, v, 1);
+        state_out.joystick = .{ @floatCast(axes[0]), @floatCast(axes[1]) };
+    }
+    if (optionalField(payload, "joystickClick")) |v| state_out.joystickClick = try boolean(v);
+    if (optionalField(payload, "a")) |v| state_out.a = try boolean(v);
+    if (optionalField(payload, "b")) |v| state_out.b = try boolean(v);
+    if (optionalField(payload, "system")) |v| state_out.system = try boolean(v);
+    return .{ .hand = hand, .state = state_out };
+}
+fn unit(v: Value, minimum: f64) !f32 {
+    const x = try number(v);
+    if (!std.math.isFinite(x) or x < minimum or x > 1) return error.InvalidAxis;
+    return @floatCast(x);
+}
+fn boolean(v: Value) !bool {
+    return if (v == .bool) v.bool else error.ExpectedBool;
 }

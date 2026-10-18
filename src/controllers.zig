@@ -19,14 +19,27 @@ const Command = struct { id: u32, config: motion.Config };
 var queue: [8]Command = undefined;
 var queued: usize = 0;
 pub var failed = std.atomic.Value(bool).init(false);
+/// `syntheticControllerType: "oculus_touch"` registers Touch input paths, so applications'
+/// shipped Touch bindings (VRChat, PetPlay) drive the synthetic hands without new bindings.
+var touch_emulation = false;
+/// Scripted input components; only the ones the active profile registers are created.
+pub const Component = enum { trigger_click, trigger_value, trigger_touch, grip_click, grip_value, grip_touch, joystick_x, joystick_y, joystick_click, joystick_touch, a_click, a_touch, b_click, b_touch, system_click };
+const component_paths = [_][:0]const u8{ "/input/trigger/click", "/input/trigger/value", "/input/trigger/touch", "/input/grip/click", "/input/grip/value", "/input/grip/touch", "/input/joystick/x", "/input/joystick/y", "/input/joystick/click", "/input/joystick/touch", "", "", "", "", "/input/system/click" };
+fn isScalar(c: Component) bool {
+    return c == .trigger_value or c == .grip_value or c == .joystick_x or c == .joystick_y;
+}
+/// A held pose replaces the analytic trajectory for one hand until cleared.
+pub const HeldPose = struct { position: [3]f64, rotation: abi.Quaternion };
+pub const InputState = struct { trigger: f32 = 0, grip: f32 = 0, joystick: [2]f32 = .{ 0, 0 }, joystickClick: bool = false, a: bool = false, b: bool = false, system: bool = false };
 const Controller = struct {
     device: abi.Device = .{ .vtable = &table.methods },
     hand: usize,
     index: u32 = 0xffffffff,
     active: bool = false,
-    trigger: u64 = 0,
-    click: u64 = 0,
+    components: [@typeInfo(Component).@"enum".fields.len]u64 = @splat(0),
     haptic: u64 = 0,
+    held: ?HeldPose = null,
+    inputs: InputState = .{},
     updates: u64 = 0,
     sample_ns: u64 = 0,
     submit_ns: u64 = 0,
@@ -50,6 +63,9 @@ pub fn start(ctx: *abi.Context, h: *abi.Host) void {
     if (err != 0) return;
     const settings: *abi.Settings = @ptrCast(@alignCast(settings_raw));
     if (!settings.vtable.getBool(settings, "driver_petplay", "syntheticControllers", &err) or err != 0) return;
+    var kind: [32]u8 = @splat(0);
+    settings.vtable.getString(settings, "driver_petplay", "syntheticControllerType", &kind, kind.len, &err);
+    touch_emulation = err == 0 and std.mem.eql(u8, std.mem.sliceTo(&kind, 0), "oculus_touch");
     const props_raw = ctx.vtable.getGenericInterface(ctx, abi.properties_version, &err);
     if (err != 0 or props_raw == null) {
         failed.store(true, .release);
@@ -111,6 +127,88 @@ pub fn enqueue(next: motion.Config) !u32 {
     queued += 1;
     return next_id;
 }
+/// Holds one hand at `pose`, or returns it to the trajectory when null. Applies immediately.
+pub fn hold(hand: usize, pose: ?HeldPose) !void {
+    std.Io.Threaded.mutexLock(&mutex);
+    defer std.Io.Threaded.mutexUnlock(&mutex);
+    if (!accepting) return error.ControllersDisabled;
+    hands[hand].held = pose;
+}
+/// Replaces one hand's scripted input state and publishes it to the runtime.
+pub fn setInput(hand: usize, next: InputState) !void {
+    std.Io.Threaded.mutexLock(&mutex);
+    defer std.Io.Threaded.mutexUnlock(&mutex);
+    if (!accepting) return error.ControllersDisabled;
+    const c = &hands[hand];
+    c.inputs = next;
+    if (c.active) publishInputs(c);
+}
+fn publishInputs(c: *Controller) void {
+    const in = input orelse return;
+    const s = c.inputs;
+    inline for (@typeInfo(Component).@"enum".fields) |f| {
+        const which: Component = @enumFromInt(f.value);
+        const handle = c.components[f.value];
+        if (handle != 0) {
+            if (comptime isScalar(which)) {
+                const value: f32 = switch (which) {
+                    .trigger_value => s.trigger,
+                    .grip_value => s.grip,
+                    .joystick_x => s.joystick[0],
+                    .joystick_y => s.joystick[1],
+                    else => unreachable,
+                };
+                _ = in.vtable.updateScalar(in, handle, value, 0);
+            } else {
+                const value = switch (which) {
+                    .trigger_click => s.trigger >= 0.75,
+                    .trigger_touch => s.trigger > 0.05,
+                    .grip_click => s.grip >= 0.75,
+                    .grip_touch => s.grip > 0.05,
+                    .joystick_click => s.joystickClick,
+                    .joystick_touch => s.joystickClick or s.joystick[0] != 0 or s.joystick[1] != 0,
+                    .a_click => s.a,
+                    .a_touch => s.a,
+                    .b_click => s.b,
+                    .b_touch => s.b,
+                    .system_click => s.system,
+                    else => unreachable,
+                };
+                _ = in.vtable.updateBoolean(in, handle, value, 0);
+            }
+        }
+    }
+}
+fn componentPath(c: *Controller, which: Component) [:0]const u8 {
+    // Touch puts A/B on the right controller and X/Y on the left.
+    const left = c.hand == 0;
+    return switch (which) {
+        .a_click => if (left) "/input/x/click" else "/input/a/click",
+        .a_touch => if (left) "/input/x/touch" else "/input/a/touch",
+        .b_click => if (left) "/input/y/click" else "/input/b/click",
+        .b_touch => if (left) "/input/y/touch" else "/input/b/touch",
+        else => component_paths[@intFromEnum(which)],
+    };
+}
+fn createComponents(c: *Controller, container: u64) bool {
+    const in = input.?;
+    inline for (@typeInfo(Component).@"enum".fields) |f| {
+        const which: Component = @enumFromInt(f.value);
+        // The original profile exposes only the trigger click and value.
+        const wanted = touch_emulation or which == .trigger_click or which == .trigger_value;
+        if (wanted) {
+            const path = componentPath(c, which);
+            const handle = &c.components[f.value];
+            const result = if (comptime isScalar(which))
+                in.vtable.createScalar(in, container, path, handle, if (which == .joystick_x or which == .joystick_y) 1 else 0, if (which == .joystick_x or which == .joystick_y) 1 else 0)
+            else
+                in.vtable.createBoolean(in, container, path, handle);
+            if (result != 0) return false;
+        }
+    }
+    publishInputs(c);
+    return true;
+}
 pub const HandSnapshot = struct {
     role: []const u8,
     active: bool,
@@ -119,6 +217,8 @@ pub const HandSnapshot = struct {
     sampleSeconds: f64,
     submitSeconds: f64,
     maxGapMs: f64,
+    held: bool,
+    inputs: InputState,
     pose: abi.Pose,
 };
 pub fn snapshot() struct { enabled: bool, failed: bool, config: motion.Config, epochSeconds: f64, appliedId: u32, queued: usize, hands: [2]HandSnapshot } {
@@ -133,6 +233,8 @@ pub fn snapshot() struct { enabled: bool, failed: bool, config: motion.Config, e
         .sampleSeconds = @as(f64, @floatFromInt(hand.sample_ns)) / 1e9,
         .submitSeconds = @as(f64, @floatFromInt(hand.submit_ns)) / 1e9,
         .maxGapMs = @as(f64, @floatFromInt(hand.max_gap_ns)) / 1e6,
+        .held = hand.held != null,
+        .inputs = hand.inputs,
         .pose = hand.last_pose,
     };
     return .{ .enabled = accepting, .failed = failed.load(.acquire), .config = config, .epochSeconds = @as(f64, @floatFromInt(epoch_ns)) / 1e9, .appliedId = applied_id, .queued = queued, .hands = result };
@@ -154,15 +256,14 @@ fn activate(device: *abi.Device, id: u32) callconv(.c) i32 {
     if (!accepting or c.active or input == null) return abi.driver_failed;
     c.index = id;
     const ok = string(c, 1000, "petplay") and string(c, 1001, "PetPlay Synthetic Controller") and string(c, 1002, serials[c.hand]) and
-        string(c, 1005, "PetPlay") and string(c, 7000, "petplay_synthetic") and
-        string(c, 1037, "{petplay}/input/synthetic_controller_profile.json") and
+        string(c, 1005, "PetPlay") and string(c, 7000, if (touch_emulation) "oculus_touch" else "petplay_synthetic") and
+        string(c, 1037, if (touch_emulation) "{petplay}/input/touch_emulation_profile.json" else "{petplay}/input/synthetic_controller_profile.json") and
         write(c, 3007, 2, @as(i32, if (c.hand == 0) 1 else 2)) and write(c, 2004, 3, @as(u64, 0x505054455354));
     const in = input.?;
     const container = properties.?.vtable.container(properties.?, id);
-    if (!ok or in.vtable.createBoolean(in, container, "/input/trigger/click", &c.click) != 0 or
-        in.vtable.createScalar(in, container, "/input/trigger/value", &c.trigger, 0, 0) != 0 or
-        in.vtable.createHaptic(in, container, "/output/haptic", &c.haptic) != 0 or
-        in.vtable.updateBoolean(in, c.click, false, 0) != 0 or in.vtable.updateScalar(in, c.trigger, 0, 0) != 0)
+    c.components = @splat(0);
+    if (!ok or !createComponents(c, container) or
+        in.vtable.createHaptic(in, container, "/output/haptic", &c.haptic) != 0)
     {
         failed.store(true, .release);
         c.index = 0xffffffff;
@@ -184,7 +285,7 @@ fn getPose(device: *abi.Device) callconv(.c) abi.Pose {
     defer std.Io.Threaded.mutexUnlock(&mutex);
     if (!c.active) return .{ .poseIsValid = false, .deviceIsConnected = false };
     const sample = clock.nowNs();
-    var pose = motion.evaluate(config, c.hand, @as(f64, @floatFromInt(sample -| epoch_ns)) / 1e9);
+    var pose = evaluate(c, sample);
     pose.poseTimeOffset = -@as(f64, @floatFromInt(clock.nowNs() -| sample)) / 1e9;
     return pose;
 }
@@ -195,7 +296,7 @@ fn sampleLoop() void {
         applyQueued(clock.nowNs());
         for (&hands) |*c| if (c.active) {
             const sample = clock.nowNs();
-            var pose = motion.evaluate(config, c.hand, @as(f64, @floatFromInt(sample -| epoch_ns)) / 1e9);
+            var pose = evaluate(c, sample);
             const submit = clock.nowNs();
             pose.poseTimeOffset = -@as(f64, @floatFromInt(submit -| sample)) / 1e9;
             host.?.vtable.trackedDevicePoseUpdated(host.?, c.index, &pose, @sizeOf(abi.Pose));
@@ -211,6 +312,18 @@ fn sampleLoop() void {
         const deadline: linux.timespec = .{ .sec = @intCast(next / 1_000_000_000), .nsec = @intCast(next % 1_000_000_000) };
         while (linux.errno(linux.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = true }, &deadline, null)) == .INTR) {}
     }
+}
+fn evaluate(c: *Controller, sample: u64) abi.Pose {
+    var pose = motion.evaluate(config, c.hand, @as(f64, @floatFromInt(sample -| epoch_ns)) / 1e9);
+    if (c.held) |held| {
+        pose.vecPosition = held.position;
+        pose.qRotation = held.rotation;
+        pose.vecVelocity = @splat(0);
+        pose.vecAcceleration = @splat(0);
+        pose.vecAngularVelocity = @splat(0);
+        pose.vecAngularAcceleration = @splat(0);
+    }
+    return pose;
 }
 fn standby(_: *abi.Device) callconv(.c) void {}
 fn component(_: *abi.Device, _: [*:0]const u8) callconv(.c) ?*anyopaque {
