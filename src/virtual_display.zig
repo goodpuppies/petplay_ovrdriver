@@ -3,7 +3,7 @@ const std = @import("std");
 const abi = @import("abi.zig");
 const linux = std.os.linux;
 pub var logger: ?*abi.DriverLog = null;
-const hz = 75;
+const profile = @import("display_profile.zig");
 const billion = 1_000_000_000;
 var epoch = std.atomic.Value(u64).init(0);
 pub var presents = std.atomic.Value(u64).init(0);
@@ -37,8 +37,7 @@ fn wait(_: *abi.VirtualDisplay) callconv(.c) void {
     const start = epoch.load(.acquire);
     if (start == 0) return;
     const elapsed = nowNs() -| start;
-    const next = (@as(u128, elapsed) * hz / billion) + 1;
-    const ns: u64 = @intCast(@as(u128, start) + (next * billion + hz - 1) / hz);
+    const ns = start + profile.tickOffsetNs(profile.frameAt(elapsed) + 1);
     const deadline: linux.timespec = .{ .sec = @intCast(ns / billion), .nsec = @intCast(ns % billion) };
     while (linux.errno(linux.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = true }, &deadline, null)) == .INTR) {}
 }
@@ -47,8 +46,9 @@ fn timing(_: *abi.VirtualDisplay, seconds: *f32, frame: *u64) callconv(.c) bool 
     const start = epoch.load(.acquire);
     if (start == 0) return false;
     const elapsed = nowNs() -| start;
+    const hz = profile.current.refreshHz;
     const scaled = @as(u128, elapsed) * hz;
     frame.* = @intCast(scaled / billion);
-    seconds.* = @as(f32, @floatFromInt(scaled % billion)) / (billion * @as(f32, hz));
+    seconds.* = @as(f32, @floatFromInt(scaled % billion)) / (billion * @as(f32, @floatFromInt(hz)));
     return true;
 }

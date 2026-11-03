@@ -4,6 +4,7 @@ const std = @import("std");
 const abi = @import("abi.zig");
 const clock = @import("virtual_display.zig");
 const linux = std.os.linux;
+const profile = @import("display_profile.zig");
 const fence_probe = @import("fence_probe.zig");
 const reader = @import("direct_reader.zig");
 var fence_budget: u32 = 0;
@@ -136,12 +137,12 @@ fn sleepUntil(ns: u64) void {
     while (linux.errno(linux.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = true }, &t, null)) == .INTR) {}
 }
 fn tickNs(n: u64) u64 {
-    return epoch + @as(u64, @intCast((@as(u128, n) * 1_000_000_000 + 74) / 75));
+    return epoch + profile.tickOffsetNs(n);
 }
 fn announceLoop() void {
     var n: u64 = 1;
     while (!exit.load(.acquire)) {
-        // Independent rational 75 Hz grid. Announce at a fixed 2 ms running-start lead;
+        // Independent rational profile-frequency grid. Announce at a fixed 2 ms running-start lead;
         // this is the synthetic display's clock, not an overlay submission phase guess.
         const announce = tickNs(n) - 2_000_000;
         sleepUntil(announce);
@@ -149,7 +150,7 @@ fn announceLoop() void {
         const now = clock.nowNs();
         const offset = (@as(f64, @floatFromInt(announce)) - @as(f64, @floatFromInt(now))) / 1e9;
         host.?.vtable.vsyncEvent(host.?, offset);
-        n = @max(n + 1, @as(u64, @intCast(@as(u128, clock.nowNs() -| epoch) * 75 / 1_000_000_000)) + 1);
+        n = @max(n + 1, profile.frameAt(clock.nowNs() -| epoch) + 1);
     }
 }
 pub var object: abi.Direct = .{ .vtable = &table.methods };
@@ -186,7 +187,7 @@ fn create(_: *abi.Direct, pid: u32, desc: *const abi.SwapDesc, out: *abi.SwapSet
     defer std.Io.Threaded.mutexUnlock(&mutex);
     stats.createCalls += 1;
     // Bound allocation and support only single-sample 8-bit RGBA/BGRA lab images.
-    if (!enabled.load(.acquire) or desc.width == 0 or desc.height == 0 or desc.width > 4096 or desc.height > 4096 or
+    if (!enabled.load(.acquire) or desc.width == 0 or desc.height == 0 or desc.width > 8192 or desc.height > 8192 or
         desc.samples != 1 or (desc.format != 37 and desc.format != 43 and desc.format != 44 and desc.format != 50))
     {
         stats.allocationFailures += 1;
@@ -194,7 +195,7 @@ fn create(_: *abi.Direct, pid: u32, desc: *const abi.SwapDesc, out: *abi.SwapSet
         return;
     }
     const bytes = @as(u64, desc.width) * desc.height * 4 * 3;
-    if (stats.liveBytes + bytes > 512 * 1024 * 1024) {
+    if (stats.liveBytes + bytes > @as(u64, profile.current.maxSwapchainMiB) * 1024 * 1024) {
         stats.allocationFailures += 1;
         return;
     }
@@ -327,7 +328,7 @@ fn post(_: *abi.Direct, throttle: ?*const abi.Throttling) callconv(.c) void {
     if (exit.load(.acquire)) return;
     // Diagnostic backend advertises no app throttling support. Cap even unexpected hints.
     const extra: u64 = if (throttle) |t| @min(t.frames, 4) else 0;
-    const n: u64 = @intCast(@as(u128, clock.nowNs() -| epoch) * 75 / 1_000_000_000 + 1 + extra);
+    const n: u64 = profile.frameAt(clock.nowNs() -| epoch) + 1 + extra;
     sleepUntil(tickNs(n));
 }
 fn timing(_: *abi.Direct, t: *abi.DirectTiming) callconv(.c) void {

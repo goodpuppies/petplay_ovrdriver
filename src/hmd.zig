@@ -4,6 +4,7 @@ const abi = @import("abi.zig");
 const sink = @import("virtual_display.zig");
 const direct = @import("direct.zig");
 const linux = std.os.linux;
+const profile = @import("display_profile.zig");
 pub var enabled = std.atomic.Value(bool).init(false);
 pub var active = std.atomic.Value(bool).init(false);
 pub var failed = std.atomic.Value(bool).init(false);
@@ -63,6 +64,10 @@ pub fn start(ctx: *abi.Context, h: *abi.Host) void {
     const settings: *abi.Settings = @ptrCast(@alignCast(raw));
     const opt_in = settings.vtable.getBool(settings, "driver_petplay", "syntheticHmd", &err);
     if (err != 0 or !opt_in) return;
+    profile.load(settings) catch {
+        failed.store(true, .release);
+        return;
+    };
     enabled.store(true, .release);
     const props_raw = ctx.vtable.getGenericInterface(ctx, abi.properties_version, &err);
     if (err != 0 or props_raw == null) {
@@ -99,8 +104,8 @@ fn activate(_: *abi.Device, id: u32) callconv(.c) i32 {
     index = id;
     const ok = stringProperty(1000, "petplay") and stringProperty(1001, "PetPlay Synthetic HMD") and
         stringProperty(1002, "PETPLAY-SYNTHETIC-HMD-001") and stringProperty(1005, "PetPlay") and
-        setProperty(f32, 2002, 1, 75) and setProperty(f32, 2001, 1, 0.002) and
-        setProperty(f32, 2003, 1, 0.064) and setProperty(f32, 2026, 1, 0) and
+        setProperty(f32, 2002, 1, @floatFromInt(profile.current.refreshHz)) and setProperty(f32, 2001, 1, 0.002) and
+        setProperty(f32, 2003, 1, profile.current.ipdMeters) and setProperty(f32, 2026, 1, 0) and
         setProperty(u64, 2004, 3, 0x505054455354) and setProperty(bool, 2007, 4, true) and
         setProperty(bool, 2044, 4, true) and setProperty(bool, 1025, 4, false) and
         setProperty(bool, 1027, 4, false);
@@ -169,8 +174,8 @@ fn debugRequest(_: *abi.Device, _: [*:0]const u8, out: [*]u8, size: u32) callcon
 fn bounds(_: *abi.Display, x: *i32, y: *i32, w: *u32, h: *u32) callconv(.c) void {
     x.* = 0;
     y.* = 0;
-    w.* = 1280;
-    h.* = 720;
+    w.* = profile.current.displayEyeWidth * 2;
+    h.* = profile.current.displayEyeHeight;
 }
 fn onDesktop(_: *abi.Display) callconv(.c) bool {
     return !direct.enabled.load(.acquire);
@@ -179,14 +184,14 @@ fn realDisplay(_: *abi.Display) callconv(.c) bool {
     return false;
 }
 fn renderSize(_: *abi.Display, w: *u32, h: *u32) callconv(.c) void {
-    w.* = 640;
-    h.* = 640;
+    w.* = profile.current.renderWidth;
+    h.* = profile.current.renderHeight;
 }
 fn viewport(_: *abi.Display, eye: i32, x: *u32, y: *u32, w: *u32, h: *u32) callconv(.c) void {
-    x.* = if (eye == 0) 0 else 640;
+    x.* = if (eye == 0) 0 else profile.current.displayEyeWidth;
     y.* = 0;
-    w.* = 640;
-    h.* = 720;
+    w.* = profile.current.displayEyeWidth;
+    h.* = profile.current.displayEyeHeight;
 }
 fn projection(_: *abi.Display, _: i32, l: *f32, r: *f32, t: *f32, b: *f32) callconv(.c) void {
     l.* = -1;

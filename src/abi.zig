@@ -80,8 +80,8 @@ pub const Settings = extern struct {
         setFloat: usize,
         setString: usize,
         getBool: *const fn (*Settings, [*:0]const u8, [*:0]const u8, ?*i32) callconv(.c) bool,
-        getInt32: usize,
-        getFloat: usize,
+        getInt32: *const fn (*Settings, [*:0]const u8, [*:0]const u8, ?*i32) callconv(.c) i32,
+        getFloat: *const fn (*Settings, [*:0]const u8, [*:0]const u8, ?*i32) callconv(.c) f32,
         getString: *const fn (*Settings, [*:0]const u8, [*:0]const u8, [*]u8, u32, ?*i32) callconv(.c) void,
     },
 };

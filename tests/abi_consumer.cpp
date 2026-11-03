@@ -18,6 +18,7 @@
 #include <linux/sync_file.h>
 struct Settings final : vr::IVRSettings {
  bool enabled=false, controllers=false, direct=false;
+ bool custom=false; int rate=90;
  const char *GetSettingsErrorNameFromEnum(vr::EVRSettingsError) override { return "test"; }
  void SetBool(const char*,const char*,bool,vr::EVRSettingsError*) override { assert(false); }
  void SetInt32(const char*,const char*,int32_t,vr::EVRSettingsError*) override { assert(false); }
@@ -30,8 +31,21 @@ struct Settings final : vr::IVRSettings {
   if(!std::strcmp(key,"syntheticControllers"))return controllers;
   assert(!std::strcmp(key,"syntheticHmd"));return enabled;
  }
- int32_t GetInt32(const char*,const char*,vr::EVRSettingsError*) override { assert(false);return 0; }
- float GetFloat(const char*,const char*,vr::EVRSettingsError*) override { assert(false);return 0; }
+ int32_t GetInt32(const char *section,const char *key,vr::EVRSettingsError *err) override {
+  assert(!std::strcmp(section,"driver_petplay"));
+  if(err)*err=custom?vr::VRSettingsError_None:vr::VRSettingsError_UnsetSettingHasNoDefault;
+  if(!custom)return 0;
+  if(!std::strcmp(key,"renderWidth"))return 3562;
+  if(!std::strcmp(key,"renderHeight"))return 3562;
+  if(!std::strcmp(key,"displayEyeWidth") || !std::strcmp(key,"displayEyeHeight"))return 2544;
+  if(!std::strcmp(key,"maxSwapchainMiB"))return 4096;
+  assert(!std::strcmp(key,"refreshHz"));return rate;
+ }
+ float GetFloat(const char *section,const char *key,vr::EVRSettingsError *err) override {
+  assert(!std::strcmp(section,"driver_petplay") && !std::strcmp(key,"ipdMeters"));
+  if(err)*err=custom?vr::VRSettingsError_None:vr::VRSettingsError_UnsetSettingHasNoDefault;
+  return .068f;
+ }
  void GetString(const char *section,const char *key,char *out,uint32_t size,vr::EVRSettingsError *err) override {
   assert(!std::strcmp(section,"driver_petplay") && (!std::strcmp(key,"socketDirectory") || !std::strcmp(key,"syntheticControllerType")) && size>0);
   out[0]=0;if(err)*err=vr::VRSettingsError_None;
@@ -40,13 +54,13 @@ struct Settings final : vr::IVRSettings {
  void RemoveKeyInSection(const char*,const char*,vr::EVRSettingsError*) override { assert(false); }
 };
 struct Properties final : vr::IVRProperties {
- unsigned writes=0; bool reject=false;
+ unsigned writes=0; bool reject=false; float frequency=75;
  vr::ETrackedPropertyError ReadPropertyBatch(vr::PropertyContainerHandle_t,vr::PropertyRead_t*,uint32_t) override { assert(false);return vr::TrackedProp_Success; }
  vr::ETrackedPropertyError WritePropertyBatch(vr::PropertyContainerHandle_t c,vr::PropertyWrite_t *batch,uint32_t count) override {
   assert(c>=123 && c<=126 && count==1);auto &b=*batch; assert(b.writeType==vr::PropertyWrite_Set && b.pvBuffer);
   if(reject)return vr::TrackedProp_InvalidOperation;
   switch(b.unTag) {
-   case vr::k_unFloatPropertyTag: assert(b.unBufferSize==sizeof(float));if(b.prop==vr::Prop_DisplayFrequency_Float)assert(*static_cast<float*>(b.pvBuffer)==75);break;
+   case vr::k_unFloatPropertyTag: assert(b.unBufferSize==sizeof(float));if(b.prop==vr::Prop_DisplayFrequency_Float)frequency=*static_cast<float*>(b.pvBuffer);break;
    case vr::k_unInt32PropertyTag: assert(b.unBufferSize==sizeof(int32_t));break;
    case vr::k_unBoolPropertyTag: assert(b.unBufferSize==sizeof(bool));break;
    case vr::k_unUint64PropertyTag: assert(b.unBufferSize==sizeof(uint64_t));break;
@@ -210,6 +224,18 @@ int main(int argc,char **argv) {
  std::this_thread::sleep_for(std::chrono::milliseconds(35));assert(sink->GetTimeSinceLastVsync(&seconds,&frame));assert(frame>=after+2);
  p->Cleanup();assert(ctx.host.updates.load()>=2);assert(ctx.host.index==0 && ctx.host.pose.vecPosition[1]==1.6);
  auto previous=ctx.host.updates.load();std::this_thread::sleep_for(std::chrono::milliseconds(10));assert(ctx.host.updates==previous);
+ // Non-default geometry and clock cross the actual official-header ABI, then restore defaults.
+ ctx.settings.custom=true;assert(p->Init(&ctx)==0);assert(ctx.properties.frequency==90);
+ display=static_cast<vr::IVRDisplayComponent*>(ctx.host.hmd->GetComponent(vr::IVRDisplayComponent_Version));
+ display->GetRecommendedRenderTargetSize(&w,&h);assert(w==3562 && h==3562);
+ display->GetWindowBounds(&x,&y,&w,&h);assert(w==5088 && h==2544);
+ display->GetEyeOutputViewport(vr::Eye_Right,&ux,&uy,&w,&h);assert(ux==2544 && w==2544 && h==2544);
+ assert(sink->GetTimeSinceLastVsync(&seconds,&frame));
+ std::this_thread::sleep_for(std::chrono::milliseconds(120));
+ assert(sink->GetTimeSinceLastVsync(&seconds,&after));assert(after-frame>=10 && seconds<1.f/90);
+ p->Cleanup();ctx.settings.rate=0;ctx.host.hmd=nullptr;
+ assert(p->Init(&ctx)==0);assert(!ctx.host.hmd);p->Cleanup();
+ ctx.settings.custom=false;ctx.settings.rate=90;
  // Compositor provider is independently initialized, with no server/IPC lifecycle.
  auto *plugin=static_cast<vr::IVRCompositorPluginProvider*>(factory(vr::IVRCompositorPluginProvider_Version,&err));assert(plugin && err==0);
  assert(!plugin->GetComponent(vr::IVRVirtualDisplay_Version));assert(plugin->Init(nullptr)==vr::VRInitError_Driver_Failed);
@@ -248,7 +274,7 @@ int main(int argc,char **argv) {
  auto fenceLayout=symbol<size_t(*)(uint32_t)>(lib,"pp_test_fence_layout");
  assert(fenceLayout(0)==sizeof(dma_buf_export_sync_file) && fenceLayout(1)==sizeof(sync_file_info) && fenceLayout(2)==sizeof(sync_fence_info) && fenceLayout(3)==offsetof(sync_file_info,sync_fence_info));
  // Driver-direct ABI and real allocation protocol, including rollback and resource retry.
- ctx.settings.direct=true;ctx.host.redirect=nullptr;assert(p->Init(&ctx)==0);assert(!ctx.host.redirect);
+ ctx.settings.direct=true;ctx.settings.custom=true;ctx.host.redirect=nullptr;assert(p->Init(&ctx)==0);assert(!ctx.host.redirect);
  auto *dm=static_cast<vr::IVRDriverDirectModeComponent*>(ctx.host.hmd->GetComponent(vr::IVRDriverDirectModeComponent_Version));assert(dm);
  display=static_cast<vr::IVRDisplayComponent*>(ctx.host.hmd->GetComponent(vr::IVRDisplayComponent_Version));assert(!display->IsDisplayOnDesktop());
  auto layout=symbol<size_t(*)(uint32_t)>(lib,"pp_test_direct_layout");
@@ -279,7 +305,7 @@ int main(int argc,char **argv) {
  p->Cleanup();assert(ctx.resources.live.empty());auto vsyncCount=ctx.host.vsyncs.load();assert(vsyncCount>0);
  std::this_thread::sleep_for(std::chrono::milliseconds(20));assert(ctx.host.vsyncs==vsyncCount);
  for(int fd:ctx.resources.fds)assert(fcntl(fd,F_GETFD)==-1);
- ctx.settings.direct=false;
+ ctx.settings.direct=false;ctx.settings.custom=false;
  // Registration rejection must not leak a device/pose thread.
  ctx.host.reject=true;ctx.host.hmd=nullptr;assert(p->Init(&ctx)==0);assert(!ctx.host.hmd);p->Cleanup();
  std::filesystem::remove_all(directory);dlclose(lib);std::puts("PASS pure Zig: provider/device virtual calls, reverse context/host calls, DriverPose_t return/layout, native actor dispatch, lifecycle");

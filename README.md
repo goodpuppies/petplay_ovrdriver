@@ -160,6 +160,36 @@ discard sink. `socketDirectory` overrides the private Unix socket location when 
 private runtime mount requires a shared home-directory path. Endpoint ownership and peer-UID
 checks still apply. One control connection is served at a time.
 
+### Synthetic display workload profiles
+
+The optional `driver_petplay` settings `renderWidth`, `renderHeight`, `displayEyeWidth`,
+`displayEyeHeight`, `refreshHz`, `ipdMeters` and `maxSwapchainMiB` configure the synthetic display.
+Defaults preserve the original 640×640 render recommendation, 640×720 eye output, 75 Hz,
+64 mm IPD and 512 MiB total direct-mode swapchain budget. Settings are loaded before activation,
+not changed while device/clock threads run. Invalid values reject HMD activation; absent settings
+use defaults. Both direct and redirect clocks follow the configured rate on a rational timeline.
+`GETDISPLAYPROFILE` reports the loaded profile without GPU readback.
+
+The parent checkout's `--display-profile=beyond75` lab option sets a BSB-like workload from saved
+physical-session logs: 3562² recommended eyes (SteamVR rounds to 3560²), 2544² output viewports,
+75 Hz, 68 mm IPD and a 4096 MiB bounded swapchain budget. This is a rendering-load profile with
+symmetric synthetic optics, not an optical/scanout emulator. Direct swapchain dimensions can
+reach 8192; allocations remain constrained by the profile's aggregate budget.
+
+From the parent checkout, with SteamVR stopped:
+
+```sh
+python3 utils/petplay-ovrdriver-lab.py run --driver-direct --direct-server --x11-compositor --touch-controllers --display-profile=beyond75 --seconds=300
+deno run -A --no-check utils/petplay-ovrdriver-lab-probe.ts --hold-open=270
+```
+
+`--refresh-hz=90` can override the synthetic clock for an explicit load experiment. The launcher
+refuses display options in real-HMD mode. Keep the 960²-only Vulkan capture layer disabled for
+these larger profiles; normal driver-direct rendering does no GPU readback. The launcher records
+its selected profile and restores original SteamVR settings after a clean shutdown. If SteamVR
+hangs during teardown, the recovery backup remains intact; stop the owned runtime before using
+`recover`. Such a run is a failed lifecycle check even when its rendering checks passed.
+
 ## Implementation and evidence
 
 | Document | Contents |

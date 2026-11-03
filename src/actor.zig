@@ -81,6 +81,7 @@ pub const Actor = struct {
         }
         if (colon == null) return null; // Fire-and-forget doesn't get a return value.
         if (std.mem.eql(u8, base, "PROBEDIRECTFENCES")) return try reply(allocator, me, from, typ, .{ .accepted = @import("direct.zig").requestFenceProbe() });
+        if (std.mem.eql(u8, base, "GETDISPLAYPROFILE")) return try reply(allocator, me, from, typ, @import("display_profile.zig").current);
         if (std.mem.eql(u8, base, "GETDIRECTSTATE")) return try reply(allocator, me, from, typ, @import("direct.zig").snapshot());
         if (std.mem.eql(u8, base, "CAPTUREDIRECTFRAME")) {
             const directory = parseCaptureDirectory(payload) catch |err| return try commandError(allocator, me, from, typ, @errorName(err));
