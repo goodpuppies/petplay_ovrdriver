@@ -72,6 +72,26 @@ Image transport should preserve native GPU resources or use a dedicated observat
 large image frames do not belong in the bounded JSON control messages. The transport and
 ownership boundaries are described in [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Single-eye desktop observation
+
+`CAPTUREDIRECTEYE {directory, layer:0, eye:0, maxEdge:1024}` captures only the selected
+presented layer and eye. Layer must be 0–7, eye 0–1 and maxEdge 256–1920; absent selections
+default to layer 0 / left eye / 1024. The result is `{present, eye:{file,width,height,format,bounds}}`.
+The image keeps its aspect ratio and is downsampled on the GPU before host readback. Only
+the selected source FD is duplicated; the other eye and overlay layers are not read back.
+The directory must already exist and be absolute; the raw RGBA/BGRA file belongs to the caller,
+which must remove it. Control messages contain metadata only. `CAPTUREDIRECTFRAME` remains
+available for full diagnostic captures with its previous output contract.
+
+PetPlay's I-mode consumer uses a private directory under `/tmp` (tmpfs here), one request in
+flight, and a GPU upload of the returned image. On the beyond75 synthetic session in Partybox,
+the previous two-eye/two-layer capture produced 280 MB and took roughly 2.9–3.0 s. Selected
+1024² capture produces 4 MB: native probes measured 35–51 ms, and the live desktop path
+measured median 50 ms (35–81 ms), about 13 eye updates/s with a 48–56 FPS window loop.
+These are diagnostic measurements, not a full-rate or zero-copy delivery claim. Producer
+synchronization remains the existing presented-frame/guard approach documented in
+`GPU-READBACK.md`; resizing does not add a producer-completion guarantee.
+
 ## Build and validate
 
 Supported target: **Linux x86-64, Zig 0.16.0**. Live GPU experiments currently require a desktop

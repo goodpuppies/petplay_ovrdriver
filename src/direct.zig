@@ -418,3 +418,65 @@ pub fn captureFrame(a: std.mem.Allocator, directory: []const u8) !Capture {
     };
     return .{ .present = frame, .layers = layers };
 }
+
+/// Read just the selected presented layer/eye, GPU-scaled before crossing into host memory.
+pub fn captureEye(a: std.mem.Allocator, directory: []const u8, layer_index: usize, eye_index: usize, max_edge: u32) !struct { present: u64, eye: CapturedEye } {
+    if (!enabled.load(.acquire)) return error.DriverDirectDisabled;
+    const raw_dir = linux.openat(linux.AT.FDCWD, try a.dupeZ(u8, directory), .{ .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.errno(raw_dir) != .SUCCESS) return error.CaptureDirectoryUnavailable;
+    const dir: i32 = @intCast(raw_dir);
+    defer _ = linux.close(dir);
+    const start = presentCount();
+    const deadline = clock.nowNs() + 500_000_000;
+    while (presentCount() == start) {
+        if (clock.nowNs() > deadline) return error.NoPresent;
+        sleepUntil(clock.nowNs() + 1_000_000);
+    }
+    sleepUntil(clock.nowNs() + 4_000_000);
+    var source: reader.Source = undefined;
+    var bounds: [4]f32 = undefined;
+    var texture: u64 = 0;
+    var frame: u64 = 0;
+    {
+        std.Io.Threaded.mutexLock(&mutex);
+        defer std.Io.Threaded.mutexUnlock(&mutex);
+        if (layer_index >= presented_count or eye_index > 1) return error.InvalidEyeSelection;
+        frame = stats.presentCalls;
+        texture = presented[layer_index].textures[eye_index];
+        bounds = presented[layer_index].bounds[eye_index];
+        const set = find(texture) orelse return error.UnknownTexture;
+        var found = false;
+        for (set.handles, 0..) |h, i| if (h == texture) {
+            const dup = linux.fcntl(set.fds[i], linux.F.DUPFD_CLOEXEC, 0);
+            if (linux.errno(dup) != .SUCCESS) return error.DupFailed;
+            source = .{ .fd = @intCast(dup), .width = set.desc.width, .height = set.desc.height, .format = set.desc.format };
+            found = true;
+            break;
+        };
+        if (!found) return error.UnknownTexture;
+    }
+    var owned = true;
+    defer if (owned) {
+        _ = linux.close(source.fd);
+    };
+    if (source.width == 0 or source.height == 0) return error.InvalidImageSize;
+    const edge = @max(source.width, source.height);
+    const width = @max(1, @as(u32, @intCast(@as(u64, source.width) * @min(edge, max_edge) / edge)));
+    const height = @max(1, @as(u32, @intCast(@as(u64, source.height) * @min(edge, max_edge) / edge)));
+    const pixels = try a.alloc(u8, @as(usize, width) * height * 4);
+    owned = false;
+    try reader.readScaled(source, pixels, width, height);
+    const name = try std.fmt.allocPrint(a, "{d}-{x}-eye.rgba", .{ frame, texture });
+    const raw = linux.openat(dir, try a.dupeZ(u8, name), .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
+    if (linux.errno(raw) != .SUCCESS) return error.OutputExistsOrUnavailable;
+    const fd: i32 = @intCast(raw);
+    defer _ = linux.close(fd);
+    var offset: usize = 0;
+    while (offset < pixels.len) {
+        const n = linux.write(fd, pixels[offset..].ptr, pixels.len - offset);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) return error.WriteFailure;
+        offset += n;
+    }
+    return .{ .present = frame, .eye = .{ .file = name, .width = width, .height = height, .format = source.format, .bounds = bounds } };
+}

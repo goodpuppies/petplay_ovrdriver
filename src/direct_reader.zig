@@ -126,17 +126,24 @@ fn memoryType(bits: u32, flags: u32) !u32 {
 
 /// Copies `source` into `out` (width × height × 4 bytes, the image's own channel order).
 pub fn read(source: Source, out: []u8) !void {
+    return readScaled(source, out, source.width, source.height);
+}
+
+/// Downsample on the GPU before host readback; source memory/layout stays unchanged.
+pub fn readScaled(source: Source, out: []u8, width: u32, height: u32) !void {
     var fd_owned = true;
     defer if (fd_owned) {
         _ = linux.close(source.fd);
     };
-    if (out.len != @as(usize, source.width) * source.height * 4) return error.WrongOutputSize;
+    if (width == 0 or height == 0 or width > source.width or height > source.height or out.len != @as(usize, width) * height * 4) return error.WrongOutputSize;
     std.Io.Threaded.mutexLock(&mutex);
     defer std.Io.Threaded.mutexUnlock(&mutex);
     try init();
 
     var image: v.VkImage = null;
     var image_memory: v.VkDeviceMemory = null;
+    var scaled_image: v.VkImage = null;
+    var scaled_memory: v.VkDeviceMemory = null;
     var buffer: v.VkBuffer = null;
     var buffer_memory: v.VkDeviceMemory = null;
     var pool: v.VkCommandPool = null;
@@ -148,6 +155,8 @@ pub fn read(source: Source, out: []u8) !void {
         if (pool != null) call("vkDestroyCommandPool", .{ device, pool, null });
         if (buffer != null) call("vkDestroyBuffer", .{ device, buffer, null });
         if (buffer_memory != null) call("vkFreeMemory", .{ device, buffer_memory, null });
+        if (scaled_image != null) call("vkDestroyImage", .{ device, scaled_image, null });
+        if (scaled_memory != null) call("vkFreeMemory", .{ device, scaled_memory, null });
         if (image != null) call("vkDestroyImage", .{ device, image, null });
         if (image_memory != null) call("vkFreeMemory", .{ device, image_memory, null });
     }
@@ -197,6 +206,23 @@ pub fn read(source: Source, out: []u8) !void {
     fd_owned = false; // A successful import transfers the fd to Vulkan.
     try check((try D("vkBindImageMemory"))(device, image, image_memory, 0));
 
+    const resized = width != source.width or height != source.height;
+    if (resized) {
+        var sci = ici;
+        sci.pNext = null;
+        sci.extent = .{ .width = width, .height = height, .depth = 1 };
+        sci.usage = v.VK_IMAGE_USAGE_TRANSFER_DST_BIT | v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        try check((try D("vkCreateImage"))(device, &sci, null, &scaled_image));
+        var sr: v.VkMemoryRequirements = undefined;
+        (try D("vkGetImageMemoryRequirements"))(device, scaled_image, &sr);
+        var sm = std.mem.zeroes(v.VkMemoryAllocateInfo);
+        sm.sType = v.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        sm.allocationSize = sr.size;
+        sm.memoryTypeIndex = try memoryType(sr.memoryTypeBits, v.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        try check((try D("vkAllocateMemory"))(device, &sm, null, &scaled_memory));
+        try check((try D("vkBindImageMemory"))(device, scaled_image, scaled_memory, 0));
+    }
+
     var bci = std.mem.zeroes(v.VkBufferCreateInfo);
     bci.sType = v.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bci.size = out.len;
@@ -239,10 +265,30 @@ pub fn read(source: Source, out: []u8) !void {
     barrier.image = image;
     barrier.subresourceRange = .{ .aspectMask = v.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
     (try D("vkCmdPipelineBarrier"))(cb, v.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, v.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+    if (resized) {
+        var sb = barrier;
+        sb.srcAccessMask = 0;
+        sb.dstAccessMask = v.VK_ACCESS_TRANSFER_WRITE_BIT;
+        sb.oldLayout = v.VK_IMAGE_LAYOUT_UNDEFINED;
+        sb.newLayout = v.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        sb.image = scaled_image;
+        (try D("vkCmdPipelineBarrier"))(cb, v.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, v.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &sb);
+        var blit = std.mem.zeroes(v.VkImageBlit);
+        blit.srcSubresource = .{ .aspectMask = v.VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 };
+        blit.dstSubresource = blit.srcSubresource;
+        blit.srcOffsets[1] = .{ .x = @intCast(source.width), .y = @intCast(source.height), .z = 1 };
+        blit.dstOffsets[1] = .{ .x = @intCast(width), .y = @intCast(height), .z = 1 };
+        (try D("vkCmdBlitImage"))(cb, image, v.VK_IMAGE_LAYOUT_GENERAL, scaled_image, v.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, v.VK_FILTER_LINEAR);
+        sb.srcAccessMask = v.VK_ACCESS_TRANSFER_WRITE_BIT;
+        sb.dstAccessMask = v.VK_ACCESS_TRANSFER_READ_BIT;
+        sb.oldLayout = v.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        sb.newLayout = v.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        (try D("vkCmdPipelineBarrier"))(cb, v.VK_PIPELINE_STAGE_TRANSFER_BIT, v.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &sb);
+    }
     var region = std.mem.zeroes(v.VkBufferImageCopy);
     region.imageSubresource = .{ .aspectMask = v.VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 };
-    region.imageExtent = .{ .width = source.width, .height = source.height, .depth = 1 };
-    (try D("vkCmdCopyImageToBuffer"))(cb, image, v.VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
+    region.imageExtent = .{ .width = width, .height = height, .depth = 1 };
+    (try D("vkCmdCopyImageToBuffer"))(cb, if (resized) scaled_image else image, if (resized) v.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL else v.VK_IMAGE_LAYOUT_GENERAL, buffer, 1, &region);
     try check((try D("vkEndCommandBuffer"))(cb));
     var fci = std.mem.zeroes(v.VkFenceCreateInfo);
     fci.sType = v.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;

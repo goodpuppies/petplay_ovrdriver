@@ -93,3 +93,24 @@ test "held poses and scripted inputs validate their payloads" {
         try std.testing.expect(std.mem.indexOf(u8, response, "__actorError") != null);
     }
 }
+
+test "single-eye capture bounds selection and stays inert without driver-direct" {
+    var actor: native.Actor = .{};
+    try init(&actor);
+    const cases = [_]struct { payload: []const u8, expected: []const u8 }{
+        .{ .payload = "{\"directory\":\"/tmp\",\"eye\":2}", .expected = "InvalidUnsignedInteger" },
+        .{ .payload = "{\"directory\":\"/tmp\",\"maxEdge\":255}", .expected = "InvalidCaptureSize" },
+        .{ .payload = "{\"directory\":\"/tmp\",\"maxEdge\":1921}", .expected = "InvalidUnsignedInteger" },
+        .{ .payload = "{\"directory\":\"relative\"}", .expected = "ExpectedAbsoluteDirectory" },
+        .{ .payload = "{\"directory\":\"/tmp\",\"layer\":0.5}", .expected = "InvalidUnsignedInteger" },
+        .{ .payload = "{\"directory\":\"/tmp\",\"unexpected\":1}", .expected = "UnknownField" },
+        .{ .payload = "{\"directory\":\"/tmp\",\"eye\":0,\"layer\":0,\"maxEdge\":1024}", .expected = "DriverDirectDisabled" },
+    };
+    for (cases) |c| {
+        const packet = try std.fmt.allocPrint(a, "{{\"kind\":\"message\",\"data\":{{\"address\":{{\"fm\":\"test@x\",\"to\":\"driver@00000000-0000-0000-0000-000000000001\"}},\"type\":\"CAPTUREDIRECTEYE:probe\",\"payload\":{s}}}}}", .{c.payload});
+        defer a.free(packet);
+        const response = (try actor.dispatch(a, packet)).?;
+        defer a.free(response);
+        try std.testing.expect(std.mem.indexOf(u8, response, c.expected) != null);
+    }
+}

@@ -83,6 +83,11 @@ pub const Actor = struct {
         if (std.mem.eql(u8, base, "PROBEDIRECTFENCES")) return try reply(allocator, me, from, typ, .{ .accepted = @import("direct.zig").requestFenceProbe() });
         if (std.mem.eql(u8, base, "GETDISPLAYPROFILE")) return try reply(allocator, me, from, typ, @import("display_profile.zig").current);
         if (std.mem.eql(u8, base, "GETDIRECTSTATE")) return try reply(allocator, me, from, typ, @import("direct.zig").snapshot());
+        if (std.mem.eql(u8, base, "CAPTUREDIRECTEYE")) {
+            const request = parseCaptureEye(payload) catch |err| return try commandError(allocator, me, from, typ, @errorName(err));
+            const capture = @import("direct.zig").captureEye(allocator, request.directory, request.layer, request.eye, request.max_edge) catch |err| return try commandError(allocator, me, from, typ, @errorName(err));
+            return try reply(allocator, me, from, typ, capture);
+        }
         if (std.mem.eql(u8, base, "CAPTUREDIRECTFRAME")) {
             const directory = parseCaptureDirectory(payload) catch |err| return try commandError(allocator, me, from, typ, @errorName(err));
             const capture = @import("direct.zig").captureFrame(allocator, directory) catch |err| return try commandError(allocator, me, from, typ, @errorName(err));
@@ -269,4 +274,21 @@ fn unit(v: Value, minimum: f64) !f32 {
 }
 fn boolean(v: Value) !bool {
     return if (v == .bool) v.bool else error.ExpectedBool;
+}
+
+fn parseCaptureEye(payload: Value) !struct { directory: []const u8, layer: usize, eye: usize, max_edge: u32 } {
+    if (payload != .object) return error.ExpectedCaptureObject;
+    try rejectUnknown(payload, &.{ "directory", "layer", "eye", "maxEdge" });
+    const directory = try text(try field(payload, "directory"));
+    if (directory.len == 0 or directory[0] != '/' or directory.len > 1024) return error.ExpectedAbsoluteDirectory;
+    const layer = if (optionalField(payload, "layer")) |x| try uint(x, 7) else 0;
+    const eye = if (optionalField(payload, "eye")) |x| try uint(x, 1) else 0;
+    const max_edge = if (optionalField(payload, "maxEdge")) |x| try uint(x, 1920) else 1024;
+    if (max_edge < 256) return error.InvalidCaptureSize;
+    return .{ .directory = directory, .layer = @intCast(layer), .eye = @intCast(eye), .max_edge = @intCast(max_edge) };
+}
+fn uint(v: Value, maximum: u32) !u32 {
+    const n = try number(v);
+    if (!std.math.isFinite(n) or n < 0 or n > @as(f64, @floatFromInt(maximum)) or @floor(n) != n) return error.InvalidUnsignedInteger;
+    return @intFromFloat(n);
 }
