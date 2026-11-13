@@ -80,7 +80,8 @@ pub fn start(ctx: *abi.Context, h: *abi.Host) void {
     const use_direct = settings.vtable.getBool(settings, "driver_petplay", "driverDirect", &err);
     direct.configure(ctx, h, err == 0 and use_direct);
     if (!h.vtable.trackedDeviceAdded(h, "PETPLAY-SYNTHETIC-HMD-001", 1, &device) or
-        (!direct.enabled.load(.acquire) and !h.vtable.trackedDeviceAdded(h, "PETPLAY-SYNTHETIC-DISPLAY-001", 5, &redirect_device))) failed.store(true, .release);
+        (!direct.enabled.load(.acquire) and !profile.current.virtualDisplay and
+            !h.vtable.trackedDeviceAdded(h, "PETPLAY-SYNTHETIC-DISPLAY-001", 5, &redirect_device))) failed.store(true, .release);
 }
 pub fn stop() void {
     deactivate(&device);
@@ -106,8 +107,16 @@ fn activate(_: *abi.Device, id: u32) callconv(.c) i32 {
         stringProperty(1002, "PETPLAY-SYNTHETIC-HMD-001") and stringProperty(1005, "PetPlay") and
         setProperty(f32, 2002, 1, @floatFromInt(profile.current.refreshHz)) and setProperty(f32, 2001, 1, 0.002) and
         setProperty(f32, 2003, 1, profile.current.ipdMeters) and setProperty(f32, 2026, 1, 0) and
-        setProperty(u64, 2004, 3, 0x505054455354) and setProperty(bool, 2007, 4, true) and
-        setProperty(bool, 2044, 4, true) and setProperty(bool, 1025, 4, false) and
+        setProperty(u64, 2004, 3, 0x505054455354) and
+        // Debug mode makes the compositor publish only a recreating mirror swapchain and no
+        // eye target (PRESENT-BOUNDARY.md). A virtual-display session instead claims to be a
+        // real direct-mode panel and must therefore report EDID identifiers to match against.
+        setProperty(bool, 2007, 4, !profile.current.virtualDisplay) and
+        setProperty(bool, 2044, 4, !profile.current.virtualDisplay) and
+        (!profile.current.virtualDisplay or
+            (setProperty(i32, 2011, 2, profile.current.edidVid) and
+                setProperty(i32, 2015, 2, profile.current.edidPid))) and
+        setProperty(bool, 1025, 4, false) and
         setProperty(bool, 1027, 4, false);
     if (!ok) {
         failed.store(true, .release);
@@ -178,10 +187,10 @@ fn bounds(_: *abi.Display, x: *i32, y: *i32, w: *u32, h: *u32) callconv(.c) void
     h.* = profile.current.displayEyeHeight;
 }
 fn onDesktop(_: *abi.Display) callconv(.c) bool {
-    return !direct.enabled.load(.acquire);
+    return !direct.enabled.load(.acquire) and !profile.current.virtualDisplay;
 }
 fn realDisplay(_: *abi.Display) callconv(.c) bool {
-    return false;
+    return profile.current.virtualDisplay;
 }
 fn renderSize(_: *abi.Display, w: *u32, h: *u32) callconv(.c) void {
     w.* = profile.current.renderWidth;

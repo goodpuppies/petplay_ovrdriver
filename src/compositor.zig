@@ -17,6 +17,8 @@ fn init(_: *abi.Plugin, context: ?*abi.Context) callconv(.c) i32 {
     err = 0;
     if (settings.vtable.getBool(settings, "driver_petplay", "driverDirect", &err) and err == 0) return abi.driver_failed;
     @import("display_profile.zig").load(settings) catch return abi.driver_failed;
+    // A DRM-backed panel must use the compositor's display path, not our legacy sink.
+    if (@import("display_profile.zig").current.virtualDisplay) return abi.driver_failed;
     err = 0;
     const log_raw = ctx.vtable.getGenericInterface(ctx, abi.log_version, &err);
     if (err == 0 and log_raw != null) {

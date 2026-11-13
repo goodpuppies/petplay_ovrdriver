@@ -74,6 +74,10 @@ ownership boundaries are described in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Single-eye desktop observation
 
+For headset-free composed stereo output, see [HEADLESS-DISPLAY.md](HEADLESS-DISPLAY.md).
+The experimental userspace Vulkan display uses Mesa's headless swapchain, with a moving-content
+and semaphore-waited capture proof on desktop SteamVR. It does not yet encode or stream video.
+
 `CAPTUREDIRECTEYE {directory, layer:0, eye:0, maxEdge:1024}` captures only the selected
 presented layer and eye. Layer must be 0–7, eye 0–1 and maxEdge 256–1920; absent selections
 default to layer 0 / left eye / 1024. The result is `{present, eye:{file,width,height,format,bounds}}`.

@@ -1,5 +1,10 @@
 # Present-boundary completion contract — 2026-11-13
 
+**Later update:** the headset-free userspace display prototype now supplies a real Mesa headless
+surface to desktop SteamVR. It passed a moving stereo-marker capture control with real present
+waits and ran past 2,250 presents. See [HEADLESS-DISPLAY.md](HEADLESS-DISPLAY.md). The virtual
+DRM connector discussed below is no longer the only candidate for headset-free presentation.
+
 **A cross-process GPU-completion contract exists at the compositor's `vkQueuePresentKHR`, and
 not at the driver-direct handoff.** On this desktop runtime with a physical headset, the
 present call carries SteamVR's own render-completion semaphore. A bounded probe copied three

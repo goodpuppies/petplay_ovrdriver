@@ -18,7 +18,7 @@
 #include <linux/sync_file.h>
 struct Settings final : vr::IVRSettings {
  bool enabled=false, controllers=false, direct=false;
- bool custom=false; int rate=90;
+ bool custom=false; int rate=90; bool virtualDisplay=false;
  const char *GetSettingsErrorNameFromEnum(vr::EVRSettingsError) override { return "test"; }
  void SetBool(const char*,const char*,bool,vr::EVRSettingsError*) override { assert(false); }
  void SetInt32(const char*,const char*,int32_t,vr::EVRSettingsError*) override { assert(false); }
@@ -29,10 +29,13 @@ struct Settings final : vr::IVRSettings {
   if(err)*err=vr::VRSettingsError_None;
   if(!std::strcmp(key,"driverDirect"))return direct;
   if(!std::strcmp(key,"syntheticControllers"))return controllers;
+  if(!std::strcmp(key,"virtualDisplay"))return virtualDisplay;
   assert(!std::strcmp(key,"syntheticHmd"));return enabled;
  }
  int32_t GetInt32(const char *section,const char *key,vr::EVRSettingsError *err) override {
   assert(!std::strcmp(section,"driver_petplay"));
+  if(!std::strcmp(key,"edidVid")){if(err)*err=vr::VRSettingsError_None;return 16908;}
+  if(!std::strcmp(key,"edidPid")){if(err)*err=vr::VRSettingsError_None;return 20560;}
   if(err)*err=custom?vr::VRSettingsError_None:vr::VRSettingsError_UnsetSettingHasNoDefault;
   if(!custom)return 0;
   if(!std::strcmp(key,"renderWidth"))return 3562;
@@ -55,10 +58,15 @@ struct Settings final : vr::IVRSettings {
 };
 struct Properties final : vr::IVRProperties {
  unsigned writes=0; bool reject=false; float frequency=75;
+ bool onDesktop=false, debugMode=false; int edidVid=0, edidPid=0;
  vr::ETrackedPropertyError ReadPropertyBatch(vr::PropertyContainerHandle_t,vr::PropertyRead_t*,uint32_t) override { assert(false);return vr::TrackedProp_Success; }
  vr::ETrackedPropertyError WritePropertyBatch(vr::PropertyContainerHandle_t c,vr::PropertyWrite_t *batch,uint32_t count) override {
   assert(c>=123 && c<=126 && count==1);auto &b=*batch; assert(b.writeType==vr::PropertyWrite_Set && b.pvBuffer);
   if(reject)return vr::TrackedProp_InvalidOperation;
+  if(b.prop==vr::Prop_IsOnDesktop_Bool)onDesktop=*static_cast<bool*>(b.pvBuffer);
+  if(b.prop==vr::Prop_DisplayDebugMode_Bool)debugMode=*static_cast<bool*>(b.pvBuffer);
+  if(b.prop==vr::Prop_EdidVendorID_Int32)edidVid=*static_cast<int32_t*>(b.pvBuffer);
+  if(b.prop==vr::Prop_EdidProductID_Int32)edidPid=*static_cast<int32_t*>(b.pvBuffer);
   switch(b.unTag) {
    case vr::k_unFloatPropertyTag: assert(b.unBufferSize==sizeof(float));if(b.prop==vr::Prop_DisplayFrequency_Float)frequency=*static_cast<float*>(b.pvBuffer);break;
    case vr::k_unInt32PropertyTag: assert(b.unBufferSize==sizeof(int32_t));break;
@@ -236,8 +244,18 @@ int main(int argc,char **argv) {
  p->Cleanup();ctx.settings.rate=0;ctx.host.hmd=nullptr;
  assert(p->Init(&ctx)==0);assert(!ctx.host.hmd);p->Cleanup();
  ctx.settings.custom=false;ctx.settings.rate=90;
+ // DRM virtual panel opts out of both the desktop/debug path and DisplayRedirect.
+ ctx.settings.virtualDisplay=true;ctx.host.redirect=nullptr;
+ assert(p->Init(&ctx)==0);assert(!ctx.host.redirect);
+ display=static_cast<vr::IVRDisplayComponent*>(ctx.host.hmd->GetComponent(vr::IVRDisplayComponent_Version));
+ assert(!display->IsDisplayOnDesktop() && display->IsDisplayRealDisplay());
+ assert(!ctx.properties.onDesktop && !ctx.properties.debugMode);
+ assert(ctx.properties.edidVid==16908 && ctx.properties.edidPid==20560);
+ p->Cleanup();ctx.settings.virtualDisplay=false;
  // Compositor provider is independently initialized, with no server/IPC lifecycle.
  auto *plugin=static_cast<vr::IVRCompositorPluginProvider*>(factory(vr::IVRCompositorPluginProvider_Version,&err));assert(plugin && err==0);
+ ctx.settings.virtualDisplay=true;assert(plugin->Init(&ctx)==vr::VRInitError_Driver_Failed);
+ assert(!plugin->GetComponent(vr::IVRVirtualDisplay_Version));ctx.settings.virtualDisplay=false;
  assert(!plugin->GetComponent(vr::IVRVirtualDisplay_Version));assert(plugin->Init(nullptr)==vr::VRInitError_Driver_Failed);
  assert(plugin->Init(&ctx)==0);assert(plugin->Init(&ctx)==vr::VRInitError_Driver_Failed);
  auto *pluginSink=static_cast<vr::IVRVirtualDisplay*>(plugin->GetComponent(vr::IVRVirtualDisplay_Version));assert(pluginSink);

@@ -7,6 +7,7 @@ const v = @cImport({
     @cInclude("vk_layer.h");
 });
 extern "c" fn getenv([*:0]const u8) ?[*:0]const u8;
+var headless_enabled = false;
 var instance: v.VkInstance = null;
 var physical: v.VkPhysicalDevice = null;
 var device: v.VkDevice = null;
@@ -77,6 +78,7 @@ export fn vkNegotiateLoaderLayerInterfaceVersion(p: *v.VkNegotiateLayerInterface
     return v.VK_SUCCESS;
 }
 fn hook(name: []const u8) v.PFN_vkVoidFunction {
+    if (headless_enabled) if (headlessHook(name)) |f| return f;
     const list = .{ .{ "vkGetInstanceProcAddr", &vkGetInstanceProcAddr }, .{ "vkGetDeviceProcAddr", &vkGetDeviceProcAddr }, .{ "vkCreateInstance", &createInstance }, .{ "vkCreateDevice", &createDevice }, .{ "vkCreateImage", &createImage }, .{ "vkDestroyImage", &destroyImage }, .{ "vkBindImageMemory", &bindImage }, .{ "vkBindImageMemory2", &bindImage2 }, .{ "vkGetMemoryFdKHR", &memoryFd }, .{ "vkCmdEndRenderPass", &endRenderPass }, .{ "vkCmdExecuteCommands", &executeCommands }, .{ "vkCmdBeginRendering", &beginRendering }, .{ "vkCmdBeginRenderingKHR", &beginRenderingKhr }, .{ "vkCreateImageView", &createView }, .{ "vkDestroyImageView", &destroyView }, .{ "vkCreateRenderPass", &createPass }, .{ "vkCreateRenderPass2", &createPass2 }, .{ "vkCreateRenderPass2KHR", &createPass2Khr }, .{ "vkDestroyRenderPass", &destroyPass }, .{ "vkCreateFramebuffer", &createFramebuffer }, .{ "vkDestroyFramebuffer", &destroyFramebuffer }, .{ "vkCmdBeginRenderPass", &beginPass }, .{ "vkCmdBeginRenderPass2", &beginPass2 }, .{ "vkCmdBeginRenderPass2KHR", &beginPass2Khr }, .{ "vkCmdEndRenderPass2", &endPass2 }, .{ "vkCmdEndRenderPass2KHR", &endPass2Khr }, .{ "vkGetDeviceQueue", &getQueue }, .{ "vkGetDeviceQueue2", &getQueue2 }, .{ "vkBeginCommandBuffer", &beginCommands }, .{ "vkFreeCommandBuffers", &freeCommands }, .{ "vkCmdPipelineBarrier", &barrier }, .{ "vkQueueSubmit", &submit }, .{ "vkQueueSubmit2", &submit2 }, .{ "vkQueueSubmit2KHR", &submit2Khr }, .{ "vkCmdPipelineBarrier2", &barrier2 }, .{ "vkCmdPipelineBarrier2KHR", &barrier2Khr }, .{ "vkDestroyDevice", &destroyDevice }, .{ "vkCreateDisplayPlaneSurfaceKHR", &createDisplayPlaneSurface }, .{ "vkCreateHeadlessSurfaceEXT", &createHeadlessSurface }, .{ "vkCreateSwapchainKHR", &createSwapchain }, .{ "vkGetSwapchainImagesKHR", &getSwapchainImages }, .{ "vkDestroySwapchainKHR", &destroySwapchain }, .{ "vkQueuePresentKHR", &queuePresent }, .{ "vkAcquireNextImageKHR", &acquireNextImage } };
     inline for (list) |item| if (std.mem.eql(u8, name, item[0])) return @ptrCast(item[1]);
     return null;
@@ -84,10 +86,12 @@ fn hook(name: []const u8) v.PFN_vkVoidFunction {
 export fn vkGetInstanceProcAddr(inst: v.VkInstance, name: [*c]const u8) callconv(.c) v.PFN_vkVoidFunction {
     const text = std.mem.span(name);
     if (std.mem.eql(u8, text, "vkGetInstanceProcAddr") or std.mem.eql(u8, text, "vkCreateInstance")) return hook(text);
+    if (headless_enabled) if (headlessHook(text)) |f| return f;
     const next = if (gipa) |f| f(inst, name) else null;
     return if (next != null) hook(text) orelse next else null;
 }
 export fn vkGetDeviceProcAddr(dev: v.VkDevice, name: [*c]const u8) callconv(.c) v.PFN_vkVoidFunction {
+    if (headless_enabled) if (headlessHook(std.mem.span(name))) |f| return f;
     const next = if (gdpa) |f| f(dev, name) else null;
     return if (next != null) hook(std.mem.span(name)) orelse next else null;
 }
@@ -100,7 +104,24 @@ fn createInstance(ci: [*c]const v.VkInstanceCreateInfo, alloc: [*c]const v.VkAll
     gipa = link.*.pfnNextGetInstanceProcAddr;
     chain.*.u.pLayerInfo = link.*.pNext;
     const next: fnType("vkCreateInstance") = @ptrCast(gipa.?(null, "vkCreateInstance").?);
-    const result = next(ci, alloc, out);
+    headless_enabled = if (getenv("PP_HEADLESS_DISPLAY")) |flag| std.mem.eql(u8, std.mem.span(flag), "1") else false;
+    var local = ci.*;
+    var extensions: [64][*c]const u8 = undefined;
+    if (headless_enabled) {
+        if (ci.*.enabledExtensionCount >= extensions.len) return v.VK_ERROR_INITIALIZATION_FAILED;
+        var found = false;
+        for (0..ci.*.enabledExtensionCount) |i| {
+            extensions[i] = ci.*.ppEnabledExtensionNames[i];
+            if (std.mem.eql(u8, std.mem.span(extensions[i]), "VK_EXT_headless_surface")) found = true;
+        }
+        if (!found) {
+            extensions[ci.*.enabledExtensionCount] = "VK_EXT_headless_surface";
+            local.enabledExtensionCount += 1;
+            local.ppEnabledExtensionNames = &extensions;
+        }
+        log("userspace display enabled: 1920x1080@75; real Mesa headless swapchain", .{});
+    }
+    const result = next(if (headless_enabled) &local else ci, alloc, out);
     if (result == v.VK_SUCCESS) {
         if (instance != null) disabled = true;
         instance = out.*;
@@ -1260,6 +1281,11 @@ fn reportSwapchain(s: *const Swapchain, what: []const u8) void {
     });
 }
 fn createDisplayPlaneSurface(inst: v.VkInstance, ci: [*c]const v.VkDisplaySurfaceCreateInfoKHR, alloc: [*c]const v.VkAllocationCallbacks, out: [*c]v.VkSurfaceKHR) callconv(.c) v.VkResult {
+    if (headless_enabled and ci.*.displayMode == headlessMode()) {
+        var info = std.mem.zeroes(v.VkHeadlessSurfaceCreateInfoEXT);
+        info.sType = v.VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT;
+        return createHeadlessSurface(inst, &info, alloc, out);
+    }
     const next: fnType("vkCreateDisplayPlaneSurfaceKHR") = @ptrCast(gipa.?(inst, "vkCreateDisplayPlaneSurfaceKHR").?);
     const result = next(inst, ci, alloc, out);
     if (result == v.VK_SUCCESS) rememberSurface(out.*, .display);
@@ -1364,7 +1390,10 @@ fn queuePresent(q: v.VkQueue, info: [*c]const v.VkPresentInfoKHR) callconv(.c) v
         }
         // Substituting the present's wait list is only sound for a single-swapchain present:
         // one image to order against, one completion semaphore to order it with.
-        if (proof != null or proof_frames == 0 or chains != 1 or s.kind != .display or index >= s.images or s.handles[index] == null or family == null or !dir()) continue;
+        if (proof != null or proof_frames == 0 or s.presents < proof_start or
+            (s.presents - proof_start) % proof_interval != 0 or chains != 1 or
+            (s.kind != .display and !(headless_enabled and s.kind == .headless)) or
+            index >= s.images or s.handles[index] == null or family == null or !dir()) continue;
         if (startProof(q, family.?, s, s.handles[index], index, wait_slice, s.presents, &proof_fence)) |run| {
             proof = run;
             proof_frames -= 1;
@@ -1410,6 +1439,8 @@ fn reportPresentationPath() void {
 const max_proof_frames = 16;
 const max_proof_waits = 8;
 var proof_frames: u32 = 0;
+var proof_start: u64 = 0;
+var proof_interval: u64 = 1;
 var proof_parsed = false;
 var proof_completion: v.VkSemaphore = null;
 var proof_captured: u64 = 0;
@@ -1419,6 +1450,8 @@ fn parseProof() void {
     const text = getenv("PP_PRESENT_PROOF_FRAMES") orelse return;
     proof_frames = std.fmt.parseInt(u32, std.mem.span(text), 10) catch 0;
     if (proof_frames > max_proof_frames) proof_frames = max_proof_frames;
+    if (getenv("PP_PRESENT_PROOF_START")) |s| proof_start = std.fmt.parseInt(u64, std.mem.span(s), 10) catch 0;
+    if (getenv("PP_PRESENT_PROOF_INTERVAL")) |s| proof_interval = @max(1, std.fmt.parseInt(u64, std.mem.span(s), 10) catch 1);
     if (proof_frames > 0) log("present proof armed for {d} frame(s)", .{proof_frames});
 }
 const ProofRun = struct {
@@ -1549,4 +1582,169 @@ test "wrist marker moments exclude desktop region, white pixels and nonmagenta c
     try std.testing.expectEqual(@as(u64, 2), result.count);
     try std.testing.expectEqual(@as(u64, 30), result.sum_x);
     try std.testing.expectEqual(@as(u64, 1500), result.sum_y);
+}
+
+// --- Scoped userspace display prototype ------------------------------------
+// Enabled only by PP_HEADLESS_DISPLAY=1 in the compositor's environment. Display
+// and mode are layer-owned identifiers; real Mesa owns surface, images and GPU sync.
+// Fixed 1080p75 profile for this experiment. This is not a general WSI implementation.
+var headless_display_tag: u8 = 0;
+var headless_mode_tag: u8 = 0;
+fn headlessDisplay() v.VkDisplayKHR {
+    return @ptrCast(&headless_display_tag);
+}
+fn headlessMode() v.VkDisplayModeKHR {
+    return @ptrCast(&headless_mode_tag);
+}
+fn headlessHook(name: []const u8) v.PFN_vkVoidFunction {
+    const list = .{
+        .{ "vkGetPhysicalDeviceDisplayPropertiesKHR", &displayProperties },
+        .{ "vkGetPhysicalDeviceDisplayProperties2KHR", &displayProperties2 },
+        .{ "vkGetPhysicalDeviceDisplayPlanePropertiesKHR", &displayPlanes },
+        .{ "vkGetPhysicalDeviceDisplayPlaneProperties2KHR", &displayPlanes2 },
+        .{ "vkGetDisplayModePropertiesKHR", &displayModes },
+        .{ "vkGetDisplayModeProperties2KHR", &displayModes2 },
+        .{ "vkCreateDisplayModeKHR", &createDisplayMode },
+        .{ "vkGetDisplayPlaneSupportedDisplaysKHR", &planeDisplays },
+        .{ "vkGetDisplayPlaneCapabilitiesKHR", &planeCapabilities },
+        .{ "vkGetDisplayPlaneCapabilities2KHR", &planeCapabilities2 },
+        .{ "vkAcquireXlibDisplayEXT", &acquireDisplay },
+        .{ "vkAcquireDrmDisplayEXT", &acquireDrmDisplay },
+        .{ "vkDisplayPowerControlEXT", &displayPower },
+        .{ "vkReleaseDisplayEXT", &releaseDisplay },
+        .{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", &surfaceCapabilities },
+        .{ "vkGetPhysicalDeviceSurfaceCapabilities2EXT", &surfaceCapabilitiesExt },
+        .{ "vkRegisterDisplayEventEXT", &displayEvent },
+        .{ "vkGetSwapchainCounterEXT", &swapchainCounter },
+    };
+    inline for (list) |item| if (std.mem.eql(u8, name, item[0])) return @ptrCast(item[1]);
+    return null;
+}
+fn one(comptime T: type, count: [*c]u32, out: [*c]T, value: T) v.VkResult {
+    if (out == null) {
+        count.* = 1;
+        return v.VK_SUCCESS;
+    }
+    if (count.* == 0) return v.VK_INCOMPLETE;
+    out[0] = value;
+    count.* = 1;
+    return v.VK_SUCCESS;
+}
+fn displayProperties(_: v.VkPhysicalDevice, count: [*c]u32, out: [*c]v.VkDisplayPropertiesKHR) callconv(.c) v.VkResult {
+    var props = std.mem.zeroes(v.VkDisplayPropertiesKHR);
+    props.display = headlessDisplay();
+    props.displayName = "PetPlay headless display";
+    props.physicalDimensions = .{ .width = 190, .height = 100 };
+    props.physicalResolution = .{ .width = 1920, .height = 1080 };
+    props.supportedTransforms = v.VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    props.persistentContent = v.VK_TRUE;
+    log("enumerating virtual display (output={})", .{out != null});
+    return one(v.VkDisplayPropertiesKHR, count, out, props);
+}
+fn displayPlanes(_: v.VkPhysicalDevice, count: [*c]u32, out: [*c]v.VkDisplayPlanePropertiesKHR) callconv(.c) v.VkResult {
+    return one(v.VkDisplayPlanePropertiesKHR, count, out, .{ .currentDisplay = headlessDisplay(), .currentStackIndex = 0 });
+}
+fn displayModes(pd: v.VkPhysicalDevice, display: v.VkDisplayKHR, count: [*c]u32, out: [*c]v.VkDisplayModePropertiesKHR) callconv(.c) v.VkResult {
+    if (display != headlessDisplay()) return I("vkGetDisplayModePropertiesKHR")(pd, display, count, out);
+    return one(v.VkDisplayModePropertiesKHR, count, out, .{ .displayMode = headlessMode(), .parameters = .{ .visibleRegion = .{ .width = 1920, .height = 1080 }, .refreshRate = 75000 } });
+}
+fn planeDisplays(_: v.VkPhysicalDevice, index: u32, count: [*c]u32, out: [*c]v.VkDisplayKHR) callconv(.c) v.VkResult {
+    if (index != 0) return v.VK_ERROR_INITIALIZATION_FAILED;
+    return one(v.VkDisplayKHR, count, out, headlessDisplay());
+}
+fn planeCapabilities(pd: v.VkPhysicalDevice, mode: v.VkDisplayModeKHR, index: u32, out: [*c]v.VkDisplayPlaneCapabilitiesKHR) callconv(.c) v.VkResult {
+    if (mode != headlessMode()) return I("vkGetDisplayPlaneCapabilitiesKHR")(pd, mode, index, out);
+    if (index != 0) return v.VK_ERROR_INITIALIZATION_FAILED;
+    out.* = std.mem.zeroes(v.VkDisplayPlaneCapabilitiesKHR);
+    out.*.supportedAlpha = v.VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
+    out.*.minSrcExtent = .{ .width = 1920, .height = 1080 };
+    out.*.maxSrcExtent = out.*.minSrcExtent;
+    out.*.minDstExtent = out.*.minSrcExtent;
+    out.*.maxDstExtent = out.*.minSrcExtent;
+    return v.VK_SUCCESS;
+}
+fn acquireDisplay(pd: v.VkPhysicalDevice, x: ?*anyopaque, display: v.VkDisplayKHR) callconv(.c) v.VkResult {
+    if (display == headlessDisplay()) {
+        log("acquired userspace display; no DRM lease", .{});
+        return v.VK_SUCCESS;
+    }
+    const next: *const fn (v.VkPhysicalDevice, ?*anyopaque, v.VkDisplayKHR) callconv(.c) v.VkResult = @ptrCast(gipa.?(instance, "vkAcquireXlibDisplayEXT").?);
+    return next(pd, x, display);
+}
+fn releaseDisplay(pd: v.VkPhysicalDevice, display: v.VkDisplayKHR) callconv(.c) v.VkResult {
+    if (display == headlessDisplay()) return v.VK_SUCCESS;
+    return I("vkReleaseDisplayEXT")(pd, display);
+}
+// The KHR_get_display_properties2 variants must describe the same virtual display,
+// and must preserve the caller's sType/pNext headers. Never send our opaque mode
+// or display tags to Mesa's real DRM/display functions.
+fn displayProperties2(pd: v.VkPhysicalDevice, count: [*c]u32, out: [*c]v.VkDisplayProperties2KHR) callconv(.c) v.VkResult {
+    return displayProperties(pd, count, if (out == null) null else &out[0].displayProperties);
+}
+fn displayPlanes2(pd: v.VkPhysicalDevice, count: [*c]u32, out: [*c]v.VkDisplayPlaneProperties2KHR) callconv(.c) v.VkResult {
+    return displayPlanes(pd, count, if (out == null) null else &out[0].displayPlaneProperties);
+}
+fn displayModes2(pd: v.VkPhysicalDevice, display: v.VkDisplayKHR, count: [*c]u32, out: [*c]v.VkDisplayModeProperties2KHR) callconv(.c) v.VkResult {
+    if (display != headlessDisplay()) return I("vkGetDisplayModeProperties2KHR")(pd, display, count, out);
+    return displayModes(pd, display, count, if (out == null) null else &out[0].displayModeProperties);
+}
+fn planeCapabilities2(pd: v.VkPhysicalDevice, info: [*c]const v.VkDisplayPlaneInfo2KHR, out: [*c]v.VkDisplayPlaneCapabilities2KHR) callconv(.c) v.VkResult {
+    if (info.*.mode != headlessMode()) return I("vkGetDisplayPlaneCapabilities2KHR")(pd, info, out);
+    return planeCapabilities(pd, info.*.mode, info.*.planeIndex, &out.*.capabilities);
+}
+fn createDisplayMode(pd: v.VkPhysicalDevice, display: v.VkDisplayKHR, info: [*c]const v.VkDisplayModeCreateInfoKHR, alloc: [*c]const v.VkAllocationCallbacks, out: [*c]v.VkDisplayModeKHR) callconv(.c) v.VkResult {
+    if (display != headlessDisplay()) return I("vkCreateDisplayModeKHR")(pd, display, info, alloc, out);
+    if (info.*.parameters.visibleRegion.width != 1920 or info.*.parameters.visibleRegion.height != 1080 or info.*.parameters.refreshRate != 75000) return v.VK_ERROR_INITIALIZATION_FAILED;
+    out.* = headlessMode();
+    return v.VK_SUCCESS;
+}
+fn acquireDrmDisplay(pd: v.VkPhysicalDevice, fd: i32, display: v.VkDisplayKHR) callconv(.c) v.VkResult {
+    if (display == headlessDisplay()) return v.VK_SUCCESS;
+    return I("vkAcquireDrmDisplayEXT")(pd, fd, display);
+}
+fn displayPower(dev: v.VkDevice, display: v.VkDisplayKHR, info: [*c]const v.VkDisplayPowerInfoEXT) callconv(.c) v.VkResult {
+    // This prototype has no physical power state to change.
+    if (display == headlessDisplay()) return v.VK_SUCCESS;
+    return D("vkDisplayPowerControlEXT")(dev, display, info);
+}
+fn surfaceCapabilities(pd: v.VkPhysicalDevice, surface: v.VkSurfaceKHR, out: [*c]v.VkSurfaceCapabilitiesKHR) callconv(.c) v.VkResult {
+    const result = I("vkGetPhysicalDeviceSurfaceCapabilitiesKHR")(pd, surface, out);
+    if (result == v.VK_SUCCESS and surfaceKind(surface) == .headless) {
+        out.*.currentExtent = .{ .width = 1920, .height = 1080 };
+        out.*.minImageExtent = out.*.currentExtent;
+        out.*.maxImageExtent = out.*.currentExtent;
+    }
+    return result;
+}
+fn surfaceCapabilitiesExt(pd: v.VkPhysicalDevice, surface: v.VkSurfaceKHR, out: [*c]v.VkSurfaceCapabilities2EXT) callconv(.c) v.VkResult {
+    if (surfaceKind(surface) != .headless) return I("vkGetPhysicalDeviceSurfaceCapabilities2EXT")(pd, surface, out);
+    var caps: v.VkSurfaceCapabilitiesKHR = undefined;
+    const result = surfaceCapabilities(pd, surface, &caps);
+    if (result != v.VK_SUCCESS) return result;
+    inline for (std.meta.fields(v.VkSurfaceCapabilitiesKHR)) |field| @field(out.*, field.name) = @field(caps, field.name);
+    out.*.supportedSurfaceCounters = v.VK_SURFACE_COUNTER_VBLANK_BIT_EXT;
+    return v.VK_SUCCESS;
+}
+fn displayEvent(dev: v.VkDevice, display: v.VkDisplayKHR, info: [*c]const v.VkDisplayEventInfoEXT, alloc: [*c]const v.VkAllocationCallbacks, out: [*c]v.VkFence) callconv(.c) v.VkResult {
+    if (display != headlessDisplay()) return D("vkRegisterDisplayEventEXT")(dev, display, info, alloc, out);
+    if (info.*.displayEvent != v.VK_DISPLAY_EVENT_TYPE_FIRST_PIXEL_OUT_EXT) return v.VK_ERROR_FEATURE_NOT_PRESENT;
+    // Prototype clock only: block until the next synthetic tick, then return a real
+    // signalled fence. This fence says nothing about GPU render completion. Actual
+    // image safety comes from the compositor's present waits and Mesa's swapchain.
+    const n = monotonicNs();
+    const tick = ((@as(u128, n) * 75 / 1_000_000_000 + 1) * 1_000_000_000 + 74) / 75;
+    var deadline: linux.timespec = .{ .sec = @intCast(tick / 1_000_000_000), .nsec = @intCast(tick % 1_000_000_000) };
+    while (linux.errno(linux.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = true }, &deadline, null)) == .INTR) {}
+    var create = std.mem.zeroes(v.VkFenceCreateInfo);
+    create.sType = v.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    create.flags = v.VK_FENCE_CREATE_SIGNALED_BIT;
+    return D("vkCreateFence")(dev, &create, alloc, out);
+}
+fn swapchainCounter(dev: v.VkDevice, chain: v.VkSwapchainKHR, counter: v.VkSurfaceCounterFlagBitsEXT, out: [*c]u64) callconv(.c) v.VkResult {
+    if (swapchainRecord(chain)) |s| if (s.kind == .headless) {
+        if (counter != v.VK_SURFACE_COUNTER_VBLANK_BIT_EXT) return v.VK_ERROR_FEATURE_NOT_PRESENT;
+        out.* = @intCast(@as(u128, monotonicNs()) * 75 / 1_000_000_000);
+        return v.VK_SUCCESS;
+    };
+    return D("vkGetSwapchainCounterEXT")(dev, chain, counter, out);
 }
