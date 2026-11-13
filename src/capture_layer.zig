@@ -7,6 +7,7 @@ const v = @cImport({
     @cInclude("vk_layer.h");
 });
 extern "c" fn getenv([*:0]const u8) ?[*:0]const u8;
+const media = @import("media_export.zig").Exporter(v);
 var headless_enabled = false;
 var instance: v.VkInstance = null;
 var physical: v.VkPhysicalDevice = null;
@@ -136,19 +137,40 @@ fn createDevice(pd: v.VkPhysicalDevice, ci: [*c]const v.VkDeviceCreateInfo, allo
     const next: fnType("vkCreateDevice") = @ptrCast(link.*.pfnNextGetInstanceProcAddr.?(instance, "vkCreateDevice").?);
     gdpa = link.*.pfnNextGetDeviceProcAddr;
     chain.*.u.pLayerInfo = link.*.pNext;
-    const result = next(pd, ci, alloc, out);
+    var local = ci.*;
+    var extensions: [64][*c]const u8 = undefined;
+    if (media.requested()) {
+        if (!headless_enabled or ci.*.enabledExtensionCount > extensions.len - 4) return v.VK_ERROR_INITIALIZATION_FAILED;
+        for (0..ci.*.enabledExtensionCount) |i| extensions[i] = ci.*.ppEnabledExtensionNames[i];
+        const required = [_][*:0]const u8{ "VK_KHR_external_memory_fd", "VK_EXT_external_memory_dma_buf", "VK_EXT_image_drm_format_modifier", "VK_KHR_external_semaphore_fd" };
+        for (required) |extension| {
+            var found = false;
+            for (extensions[0..local.enabledExtensionCount]) |existing| if (std.mem.eql(u8, std.mem.span(existing), std.mem.span(extension))) {
+                found = true;
+                break;
+            };
+            if (!found) {
+                extensions[local.enabledExtensionCount] = extension;
+                local.enabledExtensionCount += 1;
+            }
+        }
+        local.ppEnabledExtensionNames = &extensions;
+    }
+    const result = next(pd, if (media.requested()) &local else ci, alloc, out);
     if (result == v.VK_SUCCESS) {
         if (device != null) disabled = true;
         device = out.*;
         physical = pd;
         log("device initialized; request-driven readback, disabled={}", .{disabled});
         parseProof();
+        if (media.requested()) media.init(pd, out.*, instance, gdpa, gipa);
     }
     return result;
 }
 fn destroyDevice(dev: v.VkDevice, alloc: [*c]const v.VkAllocationCallbacks) callconv(.c) void {
     log("destroy device={x}, tracked={x}", .{ @intFromPtr(dev), @intFromPtr(device) });
     const next: fnType("vkDestroyDevice") = @ptrCast(gdpa.?(dev, "vkDestroyDevice").?);
+    media.stop();
     stopStream();
     if (directory >= 0) {
         _ = linux.close(directory);
@@ -1304,7 +1326,7 @@ fn createSwapchain(dev: v.VkDevice, ci: [*c]const v.VkSwapchainCreateInfoKHR, al
     // while the proof is armed; the plain audit never alters the compositor's request.
     var local = if (ci != null) ci.* else std.mem.zeroes(v.VkSwapchainCreateInfoKHR);
     var use_local = false;
-    if (ci != null and dev == device and proof_frames > 0 and (ci.*.imageUsage & v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0) {
+    if (ci != null and dev == device and (proof_frames > 0 or media.requested()) and (ci.*.imageUsage & v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0) {
         var caps: v.VkSurfaceCapabilitiesKHR = undefined;
         if (I("vkGetPhysicalDeviceSurfaceCapabilitiesKHR")(physical, ci.*.surface, &caps) == v.VK_SUCCESS and (caps.supportedUsageFlags & v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0) {
             local.imageUsage |= v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1378,6 +1400,7 @@ fn queuePresent(q: v.VkQueue, info: [*c]const v.VkPresentInfoKHR) callconv(.c) v
     var proof_fence: v.VkFence = null;
     var local = info.*;
     var substituted = false;
+    var media_completion: v.VkSemaphore = null;
     for (0..chains) |i| {
         const chain = info.*.pSwapchains[i];
         const s = swapchainRecord(chain) orelse continue;
@@ -1387,6 +1410,18 @@ fn queuePresent(q: v.VkQueue, info: [*c]const v.VkPresentInfoKHR) callconv(.c) v
         const index = if (info.*.pImageIndices != null) info.*.pImageIndices[i] else 0;
         if (s.presents <= 3 or s.presents % present_log_interval == 0) {
             log("present swapchain={x} kind={s} {d}x{d} n={d} imageIndex={d} waits={d} chains={d} queue={x} family={?d}", .{ @intFromPtr(chain), s.kind.text(), s.width, s.height, s.presents, index, waits, chains, @intFromPtr(q), family });
+        }
+        if (media.requested() and chains == 1 and s.kind == .headless and
+            s.width == 1920 and s.height == 1080 and s.format == v.VK_FORMAT_B8G8R8A8_UNORM and
+            (s.usage & v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0 and index < s.images and family != null)
+        {
+            if (media.capture(q, family.?, s.handles[index], wait_slice)) |completion| {
+                media_completion = completion;
+                local.waitSemaphoreCount = 1;
+                local.pWaitSemaphores = &media_completion;
+                substituted = true;
+            }
+            continue;
         }
         // Substituting the present's wait list is only sound for a single-swapchain present:
         // one image to order against, one completion semaphore to order it with.
