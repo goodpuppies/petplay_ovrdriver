@@ -150,6 +150,13 @@ straight alpha (`SRC_ALPHA, INV_SRC_ALPHA`).
 
 ## External reader still pending
 
+**2026-11-13 update:** the producer completion contract does not exist to be established on this
+route. A runtime-allocated timeline semaphore imports correctly and is never signalled; see
+[GPU-READBACK.md](GPU-READBACK.md#runtime-allocated-semaphores-are-never-signalled). A usable
+contract was found instead at the compositor's `vkQueuePresentKHR`, which driver-direct bypasses
+by design; see [PRESENT-BOUNDARY.md](PRESENT-BOUNDARY.md). The text below stands as the original
+scope of the unresolved problem.
+
 The lab reader above is a diagnostic, not this production reader. First establish the producer completion and resource lifetime contract. Linux currently
 passes a zero syncTexture. A Present callback, WaitFrameSync wake, mirror lock or arbitrary
 sleep must not be promoted to a producer GPU-completion fence. ALVR's current implementation

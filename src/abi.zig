@@ -179,7 +179,9 @@ pub const Resources = extern struct {
     vtable: *const extern struct {
         image: *const fn (*Resources, u32, u32, u32, bool, bool, bool, u32, u32, u32, u32, *u64) callconv(.c) bool,
         buffer: usize,
-        semaphore: usize,
+        // NewSharedVulkanSemaphore(bCounting, pSharedHandle): bCounting selects a timeline
+        // semaphore. Same slot index as the header; the neighbours stay opaque.
+        semaphore: *const fn (*Resources, bool, *u64) callconv(.c) bool,
         ref: *const fn (*Resources, u64, ?*u64) callconv(.c) bool,
         unref: *const fn (*Resources, u64) callconv(.c) bool,
         formats: usize,

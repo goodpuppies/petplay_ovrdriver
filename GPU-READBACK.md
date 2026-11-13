@@ -27,6 +27,63 @@ describes reservation-fence interoperation; explicit Vulkan use does not make an
 already-signaled reservation fence into a completion event. ALVR's current Linux implementation
 also contains synchronization workarounds. Those were a useful warning, not a contract to copy.
 
+## Runtime-allocated semaphores are never signalled
+
+Added 2026-11-13, SteamVR 2.18.4. The public resource manager can allocate a shared Vulkan
+semaphore, so the obvious remaining candidate for a completion contract was to take one and
+watch it. `src/semaphore_probe.zig` and the `PROBEDIRECTSEMAPHORE` actor request do that.
+
+Every step of the handoff works except the one that matters:
+
+| step | result |
+| --- | --- |
+| `NewSharedVulkanSemaphore(bCounting=true)` | real handle |
+| `NewSharedVulkanSemaphore(bCounting=false)` | real handle |
+| `RefResource` → IPC handle | success, both |
+| `ReceiveSharedFd` → fd | success, both |
+| `UnrefResource` | **success, both** |
+| `vkImportSemaphoreFdKHR` as a timeline semaphore | success |
+| `vkGetSemaphoreCounterValue` | reads succeed |
+| SteamVR advancing the counter | **never** |
+
+```
+PetPlay semaphore watch: imported handle=e00014623, sampling 300 presents
+PetPlay semaphore watch progress: samples=75  advances=0 last=0 presents=75
+PetPlay semaphore watch progress: samples=150 advances=0 last=0 presents=150
+PetPlay semaphore watch progress: samples=225 advances=0 last=0 presents=225
+PetPlay semaphore watch complete: samples=300 advances=0 first=0 last=0 readFailures=0
+```
+
+300 samples across 300 consecutive `Present` callbacks, zero advances, and `readFailures=0`:
+the reads were valid, the counter simply held at zero. This is not a hardware limit. An
+independent native probe (`_scratch/timeline-extsem-probe.c`) reports this driver supporting
+`timeline / OPAQUE_FD` as both exportable and importable, and `timeline / SYNC_FD` as neither —
+so a SYNC_FD-based contract would not transfer here even though DroidFrame uses one on Adreno.
+
+Allocating a semaphore does not register it for signalling, and the interface slot where such a
+handle would arrive is the `Present` sync texture, which this compositor deliberately clears.
+No channel to request signalling was found.
+
+Note the contrast with images: `UnrefResource` succeeds for semaphores, while DIRECT-MODE.md
+records it returning false for all six image handles during live provider cleanup.
+
+**Driver-direct therefore has no public completion contract on this runtime**, by three
+independent mechanisms: a deliberately zeroed sync texture, a stale dma-buf reservation fence,
+and an unsignalled runtime-allocated timeline semaphore. A consumer either accepts ALVR's
+guard-delay workaround or taps a different boundary; see
+[PRESENT-BOUNDARY.md](PRESENT-BOUNDARY.md).
+
+Reproduce, with the probe armed before the first present:
+
+```sh
+PP_SEMAPHORE_WATCH_PRESENTS=300 python3 utils/petplay-ovrdriver-lab.py run \
+  --driver-direct --direct-server --x11-compositor --seconds 30
+```
+
+`PROBEDIRECTSEMAPHORE` through `utils/petplay-ovrdriver-lab-probe.ts --direct-semaphore` also
+runs the availability half and starts a watch, but a client cannot reliably attach early enough
+to sample a useful window; prefer the environment arming.
+
 ## The measurement point that works
 
 The optional `src/capture_layer.zig` runs **inside vrcompositor's Vulkan call chain**:

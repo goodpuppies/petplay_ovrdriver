@@ -219,6 +219,7 @@ hangs during teardown, the recovery backup remains intact; stop the owned runtim
 | [CONTROLLER-LAB.md](CONTROLLER-LAB.md) | Native controller commands and public pose/prediction controls. |
 | [DIRECT-MODE.md](DIRECT-MODE.md) | Shared Vulkan images, native layer submission and output limitations. |
 | [GPU-READBACK.md](GPU-READBACK.md) | Working producer-side readback and GPU completion controls. |
+| [PRESENT-BOUNDARY.md](PRESENT-BOUNDARY.md) | Presentation-path audit and the working completion contract at the compositor's present call. |
 | [FRAME-IDENTITY.md](FRAME-IDENTITY.md) | Decoded frame delivery and VRChat/desktop workload observations. |
 | [WRIST-SWEEP.md](WRIST-SWEEP.md) | Full-scene wrist rate/phase measurements and paired presentation paths. |
 | [MOTION-IMAGES.md](MOTION-IMAGES.md) | Capture ring, marker baseline and deliberately choppy controls. |

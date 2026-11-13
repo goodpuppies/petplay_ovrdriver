@@ -7,7 +7,14 @@ const linux = std.os.linux;
 const profile = @import("display_profile.zig");
 const fence_probe = @import("fence_probe.zig");
 const reader = @import("direct_reader.zig");
+const sem_probe = @import("semaphore_probe.zig");
+extern "c" fn getenv([*:0]const u8) ?[*:0]const u8;
+var watch_env_parsed = false;
+var watch_env_presents: u32 = 0;
 var fence_budget: u32 = 0;
+var watch_budget: u32 = 0;
+/// Retained resource-manager handle for the semaphore being watched, 0 when idle.
+var watch_handle: u64 = 0;
 pub var enabled = std.atomic.Value(bool).init(false);
 var ctx: ?*abi.Context = null;
 var host: ?*abi.Host = null;
@@ -34,6 +41,25 @@ var building: [max_layers]FrameLayer = @splat(.{});
 var presented: [max_layers]FrameLayer = @splat(.{});
 var presented_count: u32 = 0;
 var stats: Stats = .{};
+/// One `NewSharedVulkanSemaphore` attempt and its export, for the completion-contract probe.
+pub const SemaphoreProbe = struct {
+    created: bool = false,
+    handle: u64 = 0,
+    refOk: bool = false,
+    fdOk: bool = false,
+    released: bool = false,
+};
+/// Counter readings from a runtime-allocated timeline semaphore across Present callbacks.
+/// `advances` is the only field that distinguishes a real completion signal from a dead one.
+pub const SemaphoreWatch = struct {
+    importOk: bool = false,
+    samples: u64 = 0,
+    advances: u64 = 0,
+    readFailures: u64 = 0,
+    first: u64 = 0,
+    last: u64 = 0,
+    max: u64 = 0,
+};
 pub const Stats = struct {
     createCalls: u64 = 0,
     allocatedSets: u64 = 0,
@@ -59,6 +85,10 @@ pub const Stats = struct {
     fenceFailedSamples: u64 = 0,
     fenceSampleNs: u64 = 0,
     lastFences: [2]fence_probe.Result = @splat(.{}),
+    semaphoreProbeRuns: u64 = 0,
+    semaphoreCounting: SemaphoreProbe = .{},
+    semaphoreBinary: SemaphoreProbe = .{},
+    semaphoreWatch: SemaphoreWatch = .{},
 };
 pub fn requestFenceProbe() bool {
     std.Io.Threaded.mutexLock(&mutex);
@@ -66,6 +96,88 @@ pub fn requestFenceProbe() bool {
     if (!enabled.load(.acquire)) return false;
     fence_budget = 64;
     return true;
+}
+/// Asks the runtime's resource manager for a shared Vulkan semaphore and exports it, which is
+/// the first half of a real cross-process completion contract. Allocating one does not oblige
+/// SteamVR to signal it; this establishes only whether the primitive is obtainable at all.
+fn probeOne(r: *abi.Resources, counting: bool, out: *SemaphoreProbe) void {
+    out.* = .{};
+    if (!r.vtable.semaphore(r, counting, &out.handle) or out.handle == 0) {
+        log("PetPlay semaphore probe: NewSharedVulkanSemaphore(counting={}) refused", .{counting});
+        return;
+    }
+    out.created = true;
+    var ipc: u64 = 0;
+    out.refOk = r.vtable.ref(r, out.handle, &ipc);
+    if (out.refOk) {
+        var fd: i32 = -1;
+        out.fdOk = r.vtable.receiveFd(r, ipc, &fd) and fd >= 0;
+        if (fd >= 0) _ = linux.close(fd);
+    }
+    // Release immediately: this probe establishes availability, it does not retain a resource.
+    out.released = r.vtable.unref(r, out.handle);
+    if (!out.released) stats.releaseFailures += 1;
+    log("PetPlay semaphore probe: counting={} handle={x} ref={} fd={} released={}", .{ counting, out.handle, out.refOk, out.fdOk, out.released });
+}
+pub fn requestSemaphoreProbe() bool {
+    std.Io.Threaded.mutexLock(&mutex);
+    defer std.Io.Threaded.mutexUnlock(&mutex);
+    if (!enabled.load(.acquire)) return false;
+    const r = manager() orelse return false;
+    stats.semaphoreProbeRuns += 1;
+    probeOne(r, true, &stats.semaphoreCounting);
+    probeOne(r, false, &stats.semaphoreBinary);
+    startWatch(r, if (watchPresetPresents() > 0) watchPresetPresents() else 300);
+    return true;
+}
+/// Retains one counting semaphore, imports its payload and samples it for a bounded number of
+/// Present callbacks. Caller holds `mutex`.
+fn watchPresetPresents() u32 {
+    if (!watch_env_parsed) {
+        watch_env_parsed = true;
+        if (getenv("PP_SEMAPHORE_WATCH_PRESENTS")) |text| {
+            watch_env_presents = std.fmt.parseInt(u32, std.mem.span(text), 10) catch 0;
+            if (watch_env_presents > 4000) watch_env_presents = 4000;
+        }
+    }
+    return watch_env_presents;
+}
+fn startWatch(r: *abi.Resources, presents: u32) void {
+    if (watch_handle != 0 or presents == 0) return;
+    var handle: u64 = 0;
+    if (!r.vtable.semaphore(r, true, &handle) or handle == 0) return;
+    var ipc: u64 = 0;
+    var fd: i32 = -1;
+    if (!r.vtable.ref(r, handle, &ipc) or !r.vtable.receiveFd(r, ipc, &fd) or fd < 0) {
+        if (fd >= 0) _ = linux.close(fd);
+        if (!r.vtable.unref(r, handle)) stats.releaseFailures += 1;
+        log("PetPlay semaphore watch: export failed", .{});
+        return;
+    }
+    sem_probe.start(fd) catch |err| {
+        log("PetPlay semaphore watch: import failed: {s}", .{@errorName(err)});
+        if (!r.vtable.unref(r, handle)) stats.releaseFailures += 1;
+        return;
+    };
+    watch_handle = handle;
+    watch_budget = presents;
+    stats.semaphoreWatch = .{ .importOk = true };
+    if (sem_probe.sample()) |value| {
+        stats.semaphoreWatch.first = value;
+        stats.semaphoreWatch.last = value;
+        stats.semaphoreWatch.max = value;
+    }
+    log("PetPlay semaphore watch: imported handle={x}, sampling {d} presents", .{ handle, watch_budget });
+}
+/// Caller holds `mutex`.
+fn stopWatch() void {
+    if (watch_handle == 0) return;
+    sem_probe.stop();
+    if (resources) |r| if (!r.vtable.unref(r, watch_handle)) {
+        stats.releaseFailures += 1;
+    };
+    watch_handle = 0;
+    watch_budget = 0;
 }
 pub fn snapshot() Stats {
     std.Io.Threaded.mutexLock(&mutex);
@@ -122,6 +234,8 @@ pub fn cleanup() void {
     stopClock();
     std.Io.Threaded.mutexLock(&mutex);
     defer std.Io.Threaded.mutexUnlock(&mutex);
+    stopWatch();
+    sem_probe.deinit();
     for (&sets) |*set| release(set);
     presented_count = 0;
     reader.deinit();
@@ -316,6 +430,23 @@ fn present(_: *abi.Direct, sync: u64) callconv(.c) void {
                 break;
             };
         }
+    }
+    if (watch_handle == 0 and stats.presentCalls == 1 and watchPresetPresents() > 0) {
+        if (manager()) |r| startWatch(r, watchPresetPresents());
+    }
+    if (watch_budget > 0) {
+        watch_budget -= 1;
+        if (sem_probe.sample()) |value| {
+            const w = &stats.semaphoreWatch;
+            w.samples += 1;
+            if (w.samples == 1) w.first = value;
+            if (value != w.last) w.advances += 1;
+            w.last = value;
+            w.max = @max(w.max, value);
+        } else stats.semaphoreWatch.readFailures += 1;
+        const w = stats.semaphoreWatch;
+        if (w.samples % 75 == 0 and w.samples > 0) log("PetPlay semaphore watch progress: samples={d} advances={d} last={d} presents={d}", .{ w.samples, w.advances, w.last, stats.presentCalls });
+        if (watch_budget == 0) log("PetPlay semaphore watch complete: samples={d} advances={d} first={d} last={d} readFailures={d}", .{ stats.semaphoreWatch.samples, stats.semaphoreWatch.advances, stats.semaphoreWatch.first, stats.semaphoreWatch.last, stats.semaphoreWatch.readFailures });
     }
     if (stats.presentCalls == 1) log("PetPlay direct first Present: layers={d}, sync={x} (no GPU readback)", .{ stats.lastLayerCount, sync });
 }

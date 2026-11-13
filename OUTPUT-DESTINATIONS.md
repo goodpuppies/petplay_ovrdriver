@@ -12,6 +12,7 @@ composition to remain in the measured path.
 | `IVRDriverDirectModeComponent` | Driver supplies swap textures and receives submitted layers | Current ALVR upstream implements this on Linux through public shared-image allocation. Our runtime and overlay handoff are still unverified; see the source audit below. |
 | Virtual Vulkan display / WSI layer | SteamVR renders into an emulated display swapchain | ALVR's older implementation provides a concrete Linux reference without a kernel virtual monitor. Larger interception surface, including display timing and swapchain ownership. |
 | Headless Vulkan surface | Runtime would need to explicitly select and use it | Vulkan function lookup exists, but no usable SteamVR headless backend has been established. Merely advertising the extension does not activate one. |
+| Compositor present interception | SteamVR composes and presents; a layer taps `vkQueuePresentKHR` | **Working completion contract on 2.18.4 with a physical headset: the present carries SteamVR's render semaphore. Mutually exclusive with driver direct mode, and `displayDebug` yields only a recreating mirror. See [PRESENT-BOUNDARY.md](PRESENT-BOUNDARY.md).** |
 | Vulkan attachment capture | SteamVR keeps composing; a diagnostic intercepts the actual GPU image | A measurement point rather than an output destination. Can preserve the behavior of interest if the underlying synthetic renderer works. Capture instrumentation currently fails; not implemented as a custom layer. |
 
 ## Public driver API distinction

@@ -77,7 +77,7 @@ export fn vkNegotiateLoaderLayerInterfaceVersion(p: *v.VkNegotiateLayerInterface
     return v.VK_SUCCESS;
 }
 fn hook(name: []const u8) v.PFN_vkVoidFunction {
-    const list = .{ .{ "vkGetInstanceProcAddr", &vkGetInstanceProcAddr }, .{ "vkGetDeviceProcAddr", &vkGetDeviceProcAddr }, .{ "vkCreateInstance", &createInstance }, .{ "vkCreateDevice", &createDevice }, .{ "vkCreateImage", &createImage }, .{ "vkDestroyImage", &destroyImage }, .{ "vkBindImageMemory", &bindImage }, .{ "vkBindImageMemory2", &bindImage2 }, .{ "vkGetMemoryFdKHR", &memoryFd }, .{ "vkCmdEndRenderPass", &endRenderPass }, .{ "vkCmdExecuteCommands", &executeCommands }, .{ "vkCmdBeginRendering", &beginRendering }, .{ "vkCmdBeginRenderingKHR", &beginRenderingKhr }, .{ "vkCreateImageView", &createView }, .{ "vkDestroyImageView", &destroyView }, .{ "vkCreateRenderPass", &createPass }, .{ "vkCreateRenderPass2", &createPass2 }, .{ "vkCreateRenderPass2KHR", &createPass2Khr }, .{ "vkDestroyRenderPass", &destroyPass }, .{ "vkCreateFramebuffer", &createFramebuffer }, .{ "vkDestroyFramebuffer", &destroyFramebuffer }, .{ "vkCmdBeginRenderPass", &beginPass }, .{ "vkCmdBeginRenderPass2", &beginPass2 }, .{ "vkCmdBeginRenderPass2KHR", &beginPass2Khr }, .{ "vkCmdEndRenderPass2", &endPass2 }, .{ "vkCmdEndRenderPass2KHR", &endPass2Khr }, .{ "vkGetDeviceQueue", &getQueue }, .{ "vkGetDeviceQueue2", &getQueue2 }, .{ "vkBeginCommandBuffer", &beginCommands }, .{ "vkFreeCommandBuffers", &freeCommands }, .{ "vkCmdPipelineBarrier", &barrier }, .{ "vkQueueSubmit", &submit }, .{ "vkQueueSubmit2", &submit2 }, .{ "vkQueueSubmit2KHR", &submit2Khr }, .{ "vkCmdPipelineBarrier2", &barrier2 }, .{ "vkCmdPipelineBarrier2KHR", &barrier2Khr }, .{ "vkDestroyDevice", &destroyDevice } };
+    const list = .{ .{ "vkGetInstanceProcAddr", &vkGetInstanceProcAddr }, .{ "vkGetDeviceProcAddr", &vkGetDeviceProcAddr }, .{ "vkCreateInstance", &createInstance }, .{ "vkCreateDevice", &createDevice }, .{ "vkCreateImage", &createImage }, .{ "vkDestroyImage", &destroyImage }, .{ "vkBindImageMemory", &bindImage }, .{ "vkBindImageMemory2", &bindImage2 }, .{ "vkGetMemoryFdKHR", &memoryFd }, .{ "vkCmdEndRenderPass", &endRenderPass }, .{ "vkCmdExecuteCommands", &executeCommands }, .{ "vkCmdBeginRendering", &beginRendering }, .{ "vkCmdBeginRenderingKHR", &beginRenderingKhr }, .{ "vkCreateImageView", &createView }, .{ "vkDestroyImageView", &destroyView }, .{ "vkCreateRenderPass", &createPass }, .{ "vkCreateRenderPass2", &createPass2 }, .{ "vkCreateRenderPass2KHR", &createPass2Khr }, .{ "vkDestroyRenderPass", &destroyPass }, .{ "vkCreateFramebuffer", &createFramebuffer }, .{ "vkDestroyFramebuffer", &destroyFramebuffer }, .{ "vkCmdBeginRenderPass", &beginPass }, .{ "vkCmdBeginRenderPass2", &beginPass2 }, .{ "vkCmdBeginRenderPass2KHR", &beginPass2Khr }, .{ "vkCmdEndRenderPass2", &endPass2 }, .{ "vkCmdEndRenderPass2KHR", &endPass2Khr }, .{ "vkGetDeviceQueue", &getQueue }, .{ "vkGetDeviceQueue2", &getQueue2 }, .{ "vkBeginCommandBuffer", &beginCommands }, .{ "vkFreeCommandBuffers", &freeCommands }, .{ "vkCmdPipelineBarrier", &barrier }, .{ "vkQueueSubmit", &submit }, .{ "vkQueueSubmit2", &submit2 }, .{ "vkQueueSubmit2KHR", &submit2Khr }, .{ "vkCmdPipelineBarrier2", &barrier2 }, .{ "vkCmdPipelineBarrier2KHR", &barrier2Khr }, .{ "vkDestroyDevice", &destroyDevice }, .{ "vkCreateDisplayPlaneSurfaceKHR", &createDisplayPlaneSurface }, .{ "vkCreateHeadlessSurfaceEXT", &createHeadlessSurface }, .{ "vkCreateSwapchainKHR", &createSwapchain }, .{ "vkGetSwapchainImagesKHR", &getSwapchainImages }, .{ "vkDestroySwapchainKHR", &destroySwapchain }, .{ "vkQueuePresentKHR", &queuePresent }, .{ "vkAcquireNextImageKHR", &acquireNextImage } };
     inline for (list) |item| if (std.mem.eql(u8, name, item[0])) return @ptrCast(item[1]);
     return null;
 }
@@ -121,6 +121,7 @@ fn createDevice(pd: v.VkPhysicalDevice, ci: [*c]const v.VkDeviceCreateInfo, allo
         device = out.*;
         physical = pd;
         log("device initialized; request-driven readback, disabled={}", .{disabled});
+        parseProof();
     }
     return result;
 }
@@ -132,6 +133,7 @@ fn destroyDevice(dev: v.VkDevice, alloc: [*c]const v.VkAllocationCallbacks) call
         _ = linux.close(directory);
         directory = -1;
     }
+    reportPresentationPath();
     next(dev, alloc);
     device = null;
 }
@@ -1171,6 +1173,354 @@ fn stopStream() void {
         stream_fd = -1;
     }
 }
+// --- Presentation-path audit ------------------------------------------------
+// Read-only record of which surfaces and swapchains the compositor creates and
+// which one it actually presents, with the per-present wait-semaphore count a
+// present-boundary consumer would have to wait on. No GPU work and no files:
+// this answers whether a usable present boundary exists, nothing more.
+const SurfaceKind = enum(u8) {
+    /// Created through an entry point this layer does not hook (X11, XCB, Wayland).
+    platform = 0,
+    /// VK_KHR_display: a DRM-leased plane, the physical/HMD output.
+    display = 1,
+    /// VK_EXT_headless_surface.
+    headless = 2,
+    fn text(self: SurfaceKind) []const u8 {
+        return switch (self) {
+            .platform => "platform",
+            .display => "display",
+            .headless => "headless",
+        };
+    }
+};
+const max_surfaces = 8;
+const Surface = struct { handle: v.VkSurfaceKHR = null, kind: SurfaceKind = .platform };
+var surfaces: [max_surfaces]Surface = @splat(.{});
+var surface_overflow: u32 = 0;
+const max_swapchains = 8;
+const Swapchain = struct {
+    handle: v.VkSwapchainKHR = null,
+    kind: SurfaceKind = .platform,
+    width: u32 = 0,
+    height: u32 = 0,
+    format: u32 = 0,
+    layers: u32 = 0,
+    usage: u32 = 0,
+    mode: u32 = 0,
+    requested: u32 = 0,
+    images: u32 = 0,
+    handles: [8]v.VkImage = @splat(null),
+    presents: u64 = 0,
+    wait_min: u32 = std.math.maxInt(u32),
+    wait_max: u32 = 0,
+};
+var swapchains: [max_swapchains]Swapchain = @splat(.{});
+var swapchain_overflow: u32 = 0;
+/// After the first few presents, log one line per this many to bound the log.
+const present_log_interval: u64 = 450;
+
+fn rememberSurface(handle: v.VkSurfaceKHR, kind: SurfaceKind) void {
+    std.Io.Threaded.mutexLock(&mutex);
+    defer std.Io.Threaded.mutexUnlock(&mutex);
+    for (&surfaces) |*s| if (s.handle == null or s.handle == handle) {
+        s.* = .{ .handle = handle, .kind = kind };
+        log("surface={x} kind={s}", .{ @intFromPtr(handle), kind.text() });
+        return;
+    };
+    surface_overflow += 1;
+}
+/// Caller holds `mutex`. An unrecorded surface is one of the platform WSI kinds.
+fn surfaceKind(handle: v.VkSurfaceKHR) SurfaceKind {
+    for (surfaces) |s| if (s.handle != null and s.handle == handle) return s.kind;
+    return .platform;
+}
+/// Caller holds `mutex`.
+fn swapchainRecord(handle: v.VkSwapchainKHR) ?*Swapchain {
+    if (handle == null) return null;
+    for (&swapchains) |*s| if (s.handle == handle) return s;
+    return null;
+}
+/// Caller holds `mutex`.
+fn reportSwapchain(s: *const Swapchain, what: []const u8) void {
+    log("{s} swapchain={x} kind={s} {d}x{d} format={d} layers={d} usage={x} mode={d} minImages={d} images={d} presents={d} waits={d}..{d}", .{
+        what,
+        @intFromPtr(s.handle),
+        s.kind.text(),
+        s.width,
+        s.height,
+        s.format,
+        s.layers,
+        s.usage,
+        s.mode,
+        s.requested,
+        s.images,
+        s.presents,
+        if (s.wait_min == std.math.maxInt(u32)) 0 else s.wait_min,
+        s.wait_max,
+    });
+}
+fn createDisplayPlaneSurface(inst: v.VkInstance, ci: [*c]const v.VkDisplaySurfaceCreateInfoKHR, alloc: [*c]const v.VkAllocationCallbacks, out: [*c]v.VkSurfaceKHR) callconv(.c) v.VkResult {
+    const next: fnType("vkCreateDisplayPlaneSurfaceKHR") = @ptrCast(gipa.?(inst, "vkCreateDisplayPlaneSurfaceKHR").?);
+    const result = next(inst, ci, alloc, out);
+    if (result == v.VK_SUCCESS) rememberSurface(out.*, .display);
+    return result;
+}
+fn createHeadlessSurface(inst: v.VkInstance, ci: [*c]const v.VkHeadlessSurfaceCreateInfoEXT, alloc: [*c]const v.VkAllocationCallbacks, out: [*c]v.VkSurfaceKHR) callconv(.c) v.VkResult {
+    const next: fnType("vkCreateHeadlessSurfaceEXT") = @ptrCast(gipa.?(inst, "vkCreateHeadlessSurfaceEXT").?);
+    const result = next(inst, ci, alloc, out);
+    if (result == v.VK_SUCCESS) rememberSurface(out.*, .headless);
+    return result;
+}
+fn createSwapchain(dev: v.VkDevice, ci: [*c]const v.VkSwapchainCreateInfoKHR, alloc: [*c]const v.VkAllocationCallbacks, out: [*c]v.VkSwapchainKHR) callconv(.c) v.VkResult {
+    const next: fnType("vkCreateSwapchainKHR") = @ptrCast(gdpa.?(dev, "vkCreateSwapchainKHR").?);
+    // A presented image can only be copied if the swapchain was created TRANSFER_SRC. The
+    // compositor does not ask for it, so the proof adds it when the surface allows, and only
+    // while the proof is armed; the plain audit never alters the compositor's request.
+    var local = if (ci != null) ci.* else std.mem.zeroes(v.VkSwapchainCreateInfoKHR);
+    var use_local = false;
+    if (ci != null and dev == device and proof_frames > 0 and (ci.*.imageUsage & v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0) {
+        var caps: v.VkSurfaceCapabilitiesKHR = undefined;
+        if (I("vkGetPhysicalDeviceSurfaceCapabilitiesKHR")(physical, ci.*.surface, &caps) == v.VK_SUCCESS and (caps.supportedUsageFlags & v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0) {
+            local.imageUsage |= v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            use_local = true;
+            log("proof adds TRANSFER_SRC: usage {x} -> {x}", .{ ci.*.imageUsage, local.imageUsage });
+        } else log("surface rejects TRANSFER_SRC (supported={x}); proof cannot copy the presented image", .{caps.supportedUsageFlags});
+    }
+    const result = next(dev, if (use_local) &local else ci, alloc, out);
+    if (result != v.VK_SUCCESS or dev != device or ci == null) return result;
+    std.Io.Threaded.mutexLock(&mutex);
+    defer std.Io.Threaded.mutexUnlock(&mutex);
+    for (&swapchains) |*s| if (s.handle == null) {
+        s.* = .{
+            .handle = out.*,
+            .kind = surfaceKind(ci.*.surface),
+            .width = ci.*.imageExtent.width,
+            .height = ci.*.imageExtent.height,
+            .format = ci.*.imageFormat,
+            .layers = ci.*.imageArrayLayers,
+            .usage = if (use_local) local.imageUsage else ci.*.imageUsage,
+            .mode = ci.*.presentMode,
+            .requested = ci.*.minImageCount,
+        };
+        log("created swapchain={x} surface={x}/{s} {d}x{d} format={d} colorSpace={d} layers={d} usage={x} mode={d} minImages={d} old={x}", .{ @intFromPtr(out.*), @intFromPtr(ci.*.surface), s.kind.text(), s.width, s.height, s.format, ci.*.imageColorSpace, s.layers, s.usage, s.mode, s.requested, @intFromPtr(ci.*.oldSwapchain) });
+        return result;
+    };
+    swapchain_overflow += 1;
+    return result;
+}
+fn getSwapchainImages(dev: v.VkDevice, chain: v.VkSwapchainKHR, count: [*c]u32, out: [*c]v.VkImage) callconv(.c) v.VkResult {
+    const next: fnType("vkGetSwapchainImagesKHR") = @ptrCast(gdpa.?(dev, "vkGetSwapchainImagesKHR").?);
+    const result = next(dev, chain, count, out);
+    if (result != v.VK_SUCCESS or dev != device or count == null) return result;
+    std.Io.Threaded.mutexLock(&mutex);
+    defer std.Io.Threaded.mutexUnlock(&mutex);
+    if (swapchainRecord(chain)) |s| {
+        s.images = count.*;
+        if (out != null) {
+            const n = @min(count.*, s.handles.len);
+            for (0..n) |i| s.handles[i] = out[i];
+            s.images = n;
+        }
+    }
+    return result;
+}
+fn destroySwapchain(dev: v.VkDevice, chain: v.VkSwapchainKHR, alloc: [*c]const v.VkAllocationCallbacks) callconv(.c) void {
+    const next: fnType("vkDestroySwapchainKHR") = @ptrCast(gdpa.?(dev, "vkDestroySwapchainKHR").?);
+    if (dev == device) {
+        std.Io.Threaded.mutexLock(&mutex);
+        defer std.Io.Threaded.mutexUnlock(&mutex);
+        if (swapchainRecord(chain)) |s| {
+            reportSwapchain(s, "destroyed");
+            s.* = .{};
+        }
+    }
+    next(dev, chain, alloc);
+}
+fn queuePresent(q: v.VkQueue, info: [*c]const v.VkPresentInfoKHR) callconv(.c) v.VkResult {
+    std.Io.Threaded.mutexLock(&mutex);
+    defer std.Io.Threaded.mutexUnlock(&mutex);
+    if (info == null) return D("vkQueuePresentKHR")(q, info);
+    var family: ?u32 = null;
+    for (queues) |x| if (x.handle == q) {
+        family = x.family;
+        break;
+    };
+    const waits = info.*.waitSemaphoreCount;
+    const chains = info.*.swapchainCount;
+    const wait_slice: []const v.VkSemaphore = if (waits > 0 and info.*.pWaitSemaphores != null) info.*.pWaitSemaphores[0..waits] else &.{};
+    var proof: ?ProofRun = null;
+    var proof_fence: v.VkFence = null;
+    var local = info.*;
+    var substituted = false;
+    for (0..chains) |i| {
+        const chain = info.*.pSwapchains[i];
+        const s = swapchainRecord(chain) orelse continue;
+        s.presents += 1;
+        s.wait_min = @min(s.wait_min, waits);
+        s.wait_max = @max(s.wait_max, waits);
+        const index = if (info.*.pImageIndices != null) info.*.pImageIndices[i] else 0;
+        if (s.presents <= 3 or s.presents % present_log_interval == 0) {
+            log("present swapchain={x} kind={s} {d}x{d} n={d} imageIndex={d} waits={d} chains={d} queue={x} family={?d}", .{ @intFromPtr(chain), s.kind.text(), s.width, s.height, s.presents, index, waits, chains, @intFromPtr(q), family });
+        }
+        // Substituting the present's wait list is only sound for a single-swapchain present:
+        // one image to order against, one completion semaphore to order it with.
+        if (proof != null or proof_frames == 0 or chains != 1 or s.kind != .display or index >= s.images or s.handles[index] == null or family == null or !dir()) continue;
+        if (startProof(q, family.?, s, s.handles[index], index, wait_slice, s.presents, &proof_fence)) |run| {
+            proof = run;
+            proof_frames -= 1;
+            local.waitSemaphoreCount = 1;
+            local.pWaitSemaphores = &proof_completion;
+            substituted = true;
+        } else |err| {
+            log("present proof submit failed: {s}", .{@errorName(err)});
+            proof_frames = 0;
+        }
+    }
+    const result = D("vkQueuePresentKHR")(q, if (substituted) &local else info);
+    // VK_SUBOPTIMAL_KHR(1000001003) / VK_ERROR_OUT_OF_DATE_KHR(-1000001004) are what make a
+    // compositor tear down and rebuild its swapchain; surface them rather than the count alone.
+    if (result != v.VK_SUCCESS) log("present returned {d}", .{result});
+    if (proof) |run| finishProof(run, proof_fence) catch |err| {
+        log("present proof capture failed: {s}", .{@errorName(err)});
+        proof_frames = 0;
+    };
+    return result;
+}
+fn acquireNextImage(dev: v.VkDevice, chain: v.VkSwapchainKHR, timeout: u64, sem: v.VkSemaphore, fence: v.VkFence, index: [*c]u32) callconv(.c) v.VkResult {
+    const next: fnType("vkAcquireNextImageKHR") = @ptrCast(gdpa.?(dev, "vkAcquireNextImageKHR").?);
+    const result = next(dev, chain, timeout, sem, fence, index);
+    if (result != v.VK_SUCCESS and dev == device) {
+        std.Io.Threaded.mutexLock(&mutex);
+        defer std.Io.Threaded.mutexUnlock(&mutex);
+        if (swapchainRecord(chain)) |s| log("acquire returned {d} on swapchain={x} kind={s} after {d} present(s)", .{ result, @intFromPtr(chain), s.kind.text(), s.presents });
+    }
+    return result;
+}
+/// Called during device teardown, with `mutex` held by the caller's path.
+fn reportPresentationPath() void {
+    for (&swapchains) |*s| if (s.handle != null) reportSwapchain(s, "final");
+    if (surface_overflow > 0 or swapchain_overflow > 0) log("audit ledger overflow: surfaces={d} swapchains={d}", .{ surface_overflow, swapchain_overflow });
+}
+
+// --- Present-boundary contract proof ---------------------------------------
+// Copies the presented image with a GPU wait on the compositor's own render-completion
+// semaphores, and makes the real present wait on ours so the image cannot be recycled
+// underneath the copy. There is no guard delay anywhere: correctness comes from the
+// semaphores, not from sleeping. Bounded to a few frames and armed by environment only.
+const max_proof_frames = 16;
+const max_proof_waits = 8;
+var proof_frames: u32 = 0;
+var proof_parsed = false;
+var proof_completion: v.VkSemaphore = null;
+var proof_captured: u64 = 0;
+fn parseProof() void {
+    if (proof_parsed) return;
+    proof_parsed = true;
+    const text = getenv("PP_PRESENT_PROOF_FRAMES") orelse return;
+    proof_frames = std.fmt.parseInt(u32, std.mem.span(text), 10) catch 0;
+    if (proof_frames > max_proof_frames) proof_frames = max_proof_frames;
+    if (proof_frames > 0) log("present proof armed for {d} frame(s)", .{proof_frames});
+}
+const ProofRun = struct {
+    buffer: v.VkBuffer = null,
+    memory: v.VkDeviceMemory = null,
+    pool: v.VkCommandPool = null,
+    size: u64 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    format: u32 = 0,
+    index: u32 = 0,
+    waits: u32 = 0,
+    n: u64 = 0,
+};
+/// Submits the copy, leaving `proof_completion` signalled by it. The caller must put that
+/// semaphore into the present it then issues, and must call `finishProof` afterwards.
+fn startProof(q: v.VkQueue, family: u32, s: *const Swapchain, image: v.VkImage, index: u32, waits: []const v.VkSemaphore, n: u64, fence: *v.VkFence) !ProofRun {
+    if (waits.len > max_proof_waits) return error.TooManyWaitSemaphores;
+    var run: ProofRun = .{ .width = s.width, .height = s.height, .format = s.format, .index = index, .waits = @intCast(waits.len), .n = n };
+    run.size = @as(u64, s.width) * s.height * 4;
+    errdefer {
+        if (run.pool != null) D("vkDestroyCommandPool")(device, run.pool, null);
+        if (run.buffer != null) D("vkDestroyBuffer")(device, run.buffer, null);
+        if (run.memory != null) D("vkFreeMemory")(device, run.memory, null);
+    }
+    var bci = std.mem.zeroes(v.VkBufferCreateInfo);
+    bci.sType = v.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = run.size;
+    bci.usage = v.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = v.VK_SHARING_MODE_EXCLUSIVE;
+    try check(D("vkCreateBuffer")(device, &bci, null, &run.buffer));
+    var req: v.VkMemoryRequirements = undefined;
+    D("vkGetBufferMemoryRequirements")(device, run.buffer, &req);
+    var mai = std.mem.zeroes(v.VkMemoryAllocateInfo);
+    mai.sType = v.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = try memoryType(req.memoryTypeBits, v.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | v.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    try check(D("vkAllocateMemory")(device, &mai, null, &run.memory));
+    try check(D("vkBindBufferMemory")(device, run.buffer, run.memory, 0));
+    var pci = std.mem.zeroes(v.VkCommandPoolCreateInfo);
+    pci.sType = v.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.queueFamilyIndex = family;
+    try check(D("vkCreateCommandPool")(device, &pci, null, &run.pool));
+    var cb: v.VkCommandBuffer = null;
+    var cai = std.mem.zeroes(v.VkCommandBufferAllocateInfo);
+    cai.sType = v.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cai.commandPool = run.pool;
+    cai.commandBufferCount = 1;
+    cai.level = v.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    try check(D("vkAllocateCommandBuffers")(device, &cai, &cb));
+    // A presented swapchain image sits in PRESENT_SRC_KHR and must be returned to it.
+    try recordCopy(cb, .{ .handle = image, .width = s.width, .height = s.height, .format = s.format, .layout = v.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, .known = true }, run.buffer);
+    if (proof_completion == null) {
+        var sci = std.mem.zeroes(v.VkSemaphoreCreateInfo);
+        sci.sType = v.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        try check(D("vkCreateSemaphore")(device, &sci, null, &proof_completion));
+    }
+    var fci = std.mem.zeroes(v.VkFenceCreateInfo);
+    fci.sType = v.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    try check(D("vkCreateFence")(device, &fci, null, fence));
+    const stages: [max_proof_waits]v.VkPipelineStageFlags = @splat(v.VK_PIPELINE_STAGE_TRANSFER_BIT);
+    var si = std.mem.zeroes(v.VkSubmitInfo);
+    si.sType = v.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.waitSemaphoreCount = @intCast(waits.len);
+    si.pWaitSemaphores = if (waits.len > 0) waits.ptr else null;
+    si.pWaitDstStageMask = if (waits.len > 0) &stages[0] else null;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &proof_completion;
+    try check(D("vkQueueSubmit")(q, 1, &si, fence.*));
+    return run;
+}
+/// Waits this one diagnostic frame's fence, then writes the pixels. The CPU wait retires a
+/// single bounded capture; it is not part of the contract being demonstrated.
+fn finishProof(run: ProofRun, fence: v.VkFence) !void {
+    var pending = true;
+    defer {
+        if (!pending) {
+            if (run.pool != null) D("vkDestroyCommandPool")(device, run.pool, null);
+            if (run.buffer != null) D("vkDestroyBuffer")(device, run.buffer, null);
+            if (run.memory != null) D("vkFreeMemory")(device, run.memory, null);
+            if (fence != null) D("vkDestroyFence")(device, fence, null);
+        }
+    }
+    try check(D("vkWaitForFences")(device, 1, &fence, v.VK_TRUE, 2_000_000_000));
+    pending = false;
+    var mapped: ?*anyopaque = null;
+    try check(D("vkMapMemory")(device, run.memory, 0, run.size, 0, &mapped));
+    defer D("vkUnmapMemory")(device, run.memory);
+    const pixels: [*]const u8 = @ptrCast(mapped.?);
+    var name: [64:0]u8 = @splat(0);
+    const text = std.fmt.bufPrintZ(&name, "present-{d}-{d}.rgba", .{ run.n, run.index }) catch return error.NameTooLong;
+    const raw = linux.openat(directory, text.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
+    if (linux.errno(raw) != .SUCCESS) return error.OutputExistsOrUnavailable;
+    const fd: i32 = @intCast(raw);
+    defer _ = linux.close(fd);
+    try writeAll(fd, pixels[0..@intCast(run.size)]);
+    proof_captured += 1;
+    log("present proof wrote {s} {d}x{d} format={d} bytes={d} renderWaits={d} guardDelayMs=0", .{ text, run.width, run.height, run.format, run.size, run.waits });
+}
+
 test "marker measurement honors channel order and reports exact moments" {
     const rgba = [_]u8{ 255, 0, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 255, 0, 255 };
     const red = markerPixels(&rgba, 2, 2, false);
