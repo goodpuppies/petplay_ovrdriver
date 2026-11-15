@@ -83,35 +83,135 @@ pub fn attachPoseRing(directory_fd: i32) void {
 }
 /// The longest a held pose is carried forward; beyond it the client has stalled.
 const max_carry_s = 0.05;
-/// `pose` carried along its velocities to the client time that corresponds to `now`.
-/// Each latch then shows the hand at a steady lag, whether the newest pose arrived early, late,
-/// or two arrived since the previous latch.
-pub fn alignedPose(pose: HeldPose, now: u64, offset: ?i64) HeldPose {
-    if (pose.client_us == 0) return pose;
-    const off = offset orelse return pose;
-    const shown_ns = @as(i64, @intCast(now)) - off;
-    const sampled_ns: i64 = @intCast(pose.client_us * 1000);
-    const age = std.math.clamp(@as(f64, @floatFromInt(shown_ns - sampled_ns)) / 1e9, 0, max_carry_s);
+/// `pose` moved `seconds` along its linear and angular velocity (world frame, left-multiplied).
+pub fn carry(pose: HeldPose, seconds: f64) HeldPose {
     var out = pose;
-    for (0..3) |i| out.position[i] += pose.velocity[i] * age;
+    for (0..3) |i| out.position[i] += pose.velocity[i] * seconds;
     const w = pose.angularVelocity;
     const rate = @sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
     if (rate > 1e-6) {
-        const half = rate * age / 2;
+        const half = rate * seconds / 2;
         const k = @sin(half) / rate;
         const a: abi.Quaternion = .{ .x = w[0] * k, .y = w[1] * k, .z = w[2] * k, .w = @cos(half) };
-        const b = pose.rotation;
-        var q: abi.Quaternion = .{
-            .x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-            .y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-            .z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-            .w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
-        };
-        const n = @sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-        q = .{ .x = q.x / n, .y = q.y / n, .z = q.z / n, .w = q.w / n };
-        out.rotation = q;
+        out.rotation = normalized(multiply(a, pose.rotation));
     }
     return out;
+}
+fn multiply(a: abi.Quaternion, b: abi.Quaternion) abi.Quaternion {
+    return .{
+        .x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        .y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        .z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        .w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    };
+}
+fn normalized(q: abi.Quaternion) abi.Quaternion {
+    const n = @sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    return .{ .x = q.x / n, .y = q.y / n, .z = q.z / n, .w = q.w / n };
+}
+/// Linear blend of two held samples (shortest-arc normalized lerp for rotation).
+fn blend(a: HeldPose, b: HeldPose, f: f64) HeldPose {
+    var out = a;
+    for (0..3) |i| {
+        out.position[i] = a.position[i] + (b.position[i] - a.position[i]) * f;
+        out.velocity[i] = a.velocity[i] + (b.velocity[i] - a.velocity[i]) * f;
+        out.angularVelocity[i] = a.angularVelocity[i] + (b.angularVelocity[i] - a.angularVelocity[i]) * f;
+    }
+    const sign: f64 = if (a.rotation.x * b.rotation.x + a.rotation.y * b.rotation.y + a.rotation.z * b.rotation.z + a.rotation.w * b.rotation.w < 0) -1 else 1;
+    out.rotation = normalized(.{
+        .x = a.rotation.x + (sign * b.rotation.x - a.rotation.x) * f,
+        .y = a.rotation.y + (sign * b.rotation.y - a.rotation.y) * f,
+        .z = a.rotation.z + (sign * b.rotation.z - a.rotation.z) * f,
+        .w = a.rotation.w + (sign * b.rotation.w - a.rotation.w) * f,
+    });
+    return out;
+}
+/// Recent client-timed samples of one hand, oldest first.
+pub const History = struct {
+    samples: [16]HeldPose = undefined,
+    len: usize = 0,
+    /// Client time between the two newest samples (ns), clamped to 5–30 ms; 14 ms when unknown.
+    pub fn interval(self: *const History) i64 {
+        if (self.len < 2) return 14_000_000;
+        const ns: i64 = @intCast((self.samples[self.len - 1].client_us - self.samples[self.len - 2].client_us) * 1000);
+        return std.math.clamp(ns, 5_000_000, 30_000_000);
+    }
+    pub fn push(self: *History, pose: HeldPose) void {
+        // A client clock that went backwards (page reload) starts a new history.
+        if (self.len > 0 and pose.client_us <= self.samples[self.len - 1].client_us) self.len = 0;
+        if (self.len == self.samples.len) {
+            std.mem.copyForwards(HeldPose, self.samples[0 .. self.len - 1], self.samples[1..self.len]);
+            self.len -= 1;
+        }
+        self.samples[self.len] = pose;
+        self.len += 1;
+    }
+};
+/// How late client samples arrive beyond the fastest delivery (ns), over the last ~2 s.
+pub const Lateness = struct {
+    values: [144]i64 = undefined,
+    len: usize = 0,
+    next: usize = 0,
+    pub fn add(self: *Lateness, ns: i64) void {
+        self.values[self.next] = ns;
+        self.next = (self.next + 1) % self.values.len;
+        self.len = @min(self.len + 1, self.values.len);
+    }
+    /// The 98th percentile, clamped to 0–40 ms: how far behind the clock mapping a latch must
+    /// look for the next sample to have arrived nearly always. A latch that misses falls back to
+    /// extrapolating by a varying amount, which is the jitter this exists to avoid.
+    pub fn margin(self: *const Lateness) i64 {
+        if (self.len == 0) return 0;
+        var sorted: [144]i64 = undefined;
+        @memcpy(sorted[0..self.len], self.values[0..self.len]);
+        std.mem.sort(i64, sorted[0..self.len], {}, std.sort.asc(i64));
+        return std.math.clamp(sorted[(self.len * 98) / 100], 0, 40_000_000);
+    }
+};
+var lateness: Lateness = .{};
+/// Moves a hand's margin toward `target`: up by at most 0.5 ms per latch (late samples need
+/// room soon), down by at most 0.05 ms. The carry horizon equals the margin, so a margin that
+/// changed quickly would turn the velocity's error back into visible motion.
+fn slewMargin(c: *Controller, target: i64) i64 {
+    c.margin_ns += std.math.clamp(target - c.margin_ns, -50_000, 500_000);
+    return c.margin_ns;
+}
+/// One sample interval plus the 98th-percentile lateness, at most 45 ms.
+pub fn latchMargin(history: *const History, late: *const Lateness) i64 {
+    return @min(history.interval() + late.margin(), 45_000_000);
+}
+/// The hand to show at a latch at `now`: interpolated between the real samples around the
+/// client time `margin_ns` behind the clock mapping, then carried forward by that same margin.
+/// Interpolating needs the sample after that time to have arrived, so the margin is the
+/// client's sample interval plus how late samples usually arrive (`latchMargin`).
+/// The carry horizon is the same every frame, so an imperfect velocity only shifts the hand
+/// slightly instead of making it jitter with network timing (carrying the newest sample by
+/// its varying age did). Beyond the newest sample it extrapolates, at most `max_carry_s`.
+pub fn latchedPose(history: *const History, now: u64, offset: ?i64, margin_ns: i64) ?HeldPose {
+    if (history.len == 0) return null;
+    const newest = history.samples[history.len - 1];
+    const off = offset orelse return newest;
+    const target = @as(i64, @intCast(now)) - off - margin_ns;
+    const at = struct {
+        fn ns(p: HeldPose) i64 {
+            return @intCast(p.client_us * 1000);
+        }
+    }.ns;
+    var base = history.samples[0];
+    var behind: i64 = 0; // how far `base` must be carried to reach `target`
+    if (target >= at(newest)) {
+        base = newest;
+        behind = target - at(newest);
+    } else if (target > at(history.samples[0])) {
+        var i: usize = history.len - 1;
+        while (at(history.samples[i - 1]) > target) i -= 1;
+        const a = history.samples[i - 1];
+        const b = history.samples[i];
+        const f = @as(f64, @floatFromInt(target - at(a))) / @as(f64, @floatFromInt(at(b) - at(a)));
+        base = blend(a, b, f);
+    }
+    const seconds = @as(f64, @floatFromInt(behind + margin_ns)) / 1e9;
+    return carry(base, std.math.clamp(seconds, 0, max_carry_s));
 }
 pub const InputState = struct { trigger: f32 = 0, grip: f32 = 0, joystick: [2]f32 = .{ 0, 0 }, joystickClick: bool = false, a: bool = false, b: bool = false, system: bool = false };
 const Controller = struct {
@@ -126,6 +226,10 @@ const Controller = struct {
     latched: ?HeldPose = null,
     /// When `held` last arrived (CLOCK_MONOTONIC).
     held_ns: u64 = 0,
+    /// Client-timed samples for latching between real poses.
+    history: History = .{},
+    /// The margin in use, moved toward `latchMargin` slowly (see `latchAndPublish`).
+    margin_ns: i64 = 0,
     inputs: InputState = .{},
     updates: u64 = 0,
     sample_ns: u64 = 0,
@@ -196,6 +300,11 @@ pub fn stop() void {
     accepting = false;
     latching = false;
     clock_offset.reset();
+    lateness = .{};
+    for (&hands) |*hand| {
+        hand.history.len = 0;
+        hand.margin_ns = 0;
+    }
     queued = 0;
     for (&hands) |*hand| {
         hand.active = false;
@@ -221,10 +330,15 @@ pub fn hold(hand: usize, pose: ?HeldPose) !void {
     std.Io.Threaded.mutexLock(&mutex);
     defer std.Io.Threaded.mutexUnlock(&mutex);
     if (!accepting) return error.ControllersDisabled;
-    if (pose) |p| if (p.client_us != 0) {
-        const now = clock.nowNs();
-        clock_offset.add(now, @as(i64, @intCast(now)) - @as(i64, @intCast(p.client_us * 1000)));
-    };
+    if (pose) |p| {
+        if (p.client_us != 0) {
+            const now = clock.nowNs();
+            const offset = @as(i64, @intCast(now)) - @as(i64, @intCast(p.client_us * 1000));
+            clock_offset.add(now, offset);
+            lateness.add(offset - clock_offset.min().?);
+            hands[hand].history.push(p);
+        } else hands[hand].history.len = 0;
+    } else hands[hand].history.len = 0;
     hands[hand].held = pose;
     hands[hand].held_ns = clock.nowNs();
 }
@@ -420,7 +534,10 @@ pub fn latchAndPublish() void {
     const now = clock.nowNs();
     const offset = clock_offset.min();
     for (&hands) |*c| {
-        c.latched = if (c.held) |h| alignedPose(h, now, offset) else null;
+        c.latched = if (c.held) |h|
+            (if (h.client_us != 0) latchedPose(&c.history, now, offset, slewMargin(c, latchMargin(&c.history, &lateness))) else null) orelse h
+        else
+            null;
         if (c.latched) |l| if (ring) |r| r.write(.{
             .time_ns = now,
             .client_sequence = l.client_us,
@@ -493,43 +610,52 @@ test "motion queue validates capacity and changes state only at an owner boundar
     try std.testing.expectApproxEqAbs(@as(f64, 1.2), applied.config.frequencyHz, 1e-12);
     try std.testing.expectApproxEqAbs(@as(f64, 1.23456789), applied.epochSeconds, 1e-12);
 }
-test "held hands latch at a steady lag despite jittered arrivals" {
+test "held hands latch at a steady lag despite jittered arrivals and a wrong velocity" {
     // A hand moving at 1 m/s along x, sampled every 10 ms on a client clock 5 s ahead of ours,
-    // delivered 3–15 ms late. Latching every 10 ms must step exactly 10 mm each time.
+    // delivered 3–15 ms late, reporting 0.8 m/s. Latching every 10 ms must step exactly 10 mm:
+    // interpolation uses the real positions, and the carry horizon (the margin) is constant.
     var offsets: ClockOffset = .{};
-    const jitter_ms = [_]u64{ 3, 15, 4, 9, 3, 14, 6, 3, 12, 5 };
-    const client_base_us: u64 = 5_000_000 + 1_000_000;
-    var newest: ?HeldPose = null;
-    var latched: [10]f64 = undefined;
-    var arrival_index: usize = 0;
-    for (0..10) |tick| {
+    var late: Lateness = .{};
+    var history: History = .{};
+    const jitter_ms = [_]u64{ 3, 15, 4, 9, 3, 14, 6, 3, 12, 5, 7, 3, 13, 4, 3, 8 };
+    const client_base_us: u64 = 6_000_000;
+    var latched: [14]f64 = undefined;
+    var tight: [14]f64 = undefined;
+    var next: usize = 0;
+    for (0..latched.len) |tick| {
         const latch_ns: u64 = 1_000_000_000 + 20_000_000 + tick * 10_000_000;
-        // Deliver every sample that has arrived by this latch.
-        while (arrival_index < jitter_ms.len) {
-            const sampled_ns: u64 = 1_000_000_000 + arrival_index * 10_000_000;
-            const arrival_ns = sampled_ns + jitter_ms[arrival_index] * 1_000_000;
+        while (next < jitter_ms.len) {
+            const arrival_ns = 1_000_000_000 + next * 10_000_000 + jitter_ms[next] * 1_000_000;
             if (arrival_ns > latch_ns) break;
-            const client_us = client_base_us + arrival_index * 10_000;
-            offsets.add(arrival_ns, @as(i64, @intCast(arrival_ns)) - @as(i64, @intCast(client_us * 1000)));
-            newest = .{
-                .position = .{ @as(f64, @floatFromInt(arrival_index)) * 0.01, 0, 0 },
+            const client_us = client_base_us + next * 10_000;
+            const offset = @as(i64, @intCast(arrival_ns)) - @as(i64, @intCast(client_us * 1000));
+            offsets.add(arrival_ns, offset);
+            late.add(offset - offsets.min().?);
+            history.push(.{
+                .position = .{ @as(f64, @floatFromInt(next)) * 0.01, 0, 0 },
                 .rotation = .{ .x = 0, .y = 0, .z = 0, .w = 1 },
-                .velocity = .{ 1, 0, 0 },
+                .velocity = .{ 0.8, 0, 0 },
                 .client_us = client_us,
-            };
-            arrival_index += 1;
+            });
+            next += 1;
         }
-        latched[tick] = alignedPose(newest.?, latch_ns, offsets.min()).position[0];
+        // A margin covering every arrival here: one 10 ms interval + at most 12 ms lateness...
+        latched[tick] = latchedPose(&history, latch_ns, offsets.min(), 22_000_000).?.position[0];
+        // ...and the one latchMargin picks (90th percentile), which a few arrivals miss.
+        tight[tick] = latchedPose(&history, latch_ns, offsets.min(), latchMargin(&history, &late)).?.position[0];
     }
-    // Once the fastest delivery (3 ms) has been seen, every step is the same.
-    for (2..9) |i| try std.testing.expectApproxEqAbs(@as(f64, 0.01), latched[i + 1] - latched[i], 1e-9);
+    for (3..latched.len - 1) |i| try std.testing.expectApproxEqAbs(@as(f64, 0.01), latched[i + 1] - latched[i], 1e-9);
+    // A missed sample costs at most (true − reported velocity) × how late it was: here ≤ 1 mm.
+    for (3..tight.len - 1) |i| try std.testing.expectApproxEqAbs(@as(f64, 0.01), tight[i + 1] - tight[i], 0.0011);
+    try std.testing.expectEqual(@as(i64, 10_000_000), history.interval());
+    // The margin is the 90th percentile of lateness above the fastest delivery.
+    try std.testing.expect(late.margin() >= 9_000_000 and late.margin() <= 12_000_000);
     // Rotation carries along the angular velocity: 1 rad/s about y for 50 ms.
     const turning: HeldPose = .{ .position = @splat(0), .rotation = .{ .x = 0, .y = 0, .z = 0, .w = 1 }, .angularVelocity = .{ 0, 1, 0 }, .client_us = 1000 };
-    const turned = alignedPose(turning, 1_000_000 + 50_000_000, 0);
-    try std.testing.expectApproxEqAbs(@sin(0.025), turned.rotation.y, 1e-9);
-    // A pose without a client time is shown as it arrived.
-    const plain: HeldPose = .{ .position = .{ 1, 2, 3 }, .rotation = .{ .x = 0, .y = 0, .z = 0, .w = 1 }, .velocity = .{ 1, 0, 0 } };
-    try std.testing.expectEqual(@as(f64, 1), alignedPose(plain, 5_000_000_000, 0).position[0]);
+    try std.testing.expectApproxEqAbs(@sin(0.025), carry(turning, 0.05).rotation.y, 1e-9);
+    // A client clock that restarts (page reload) starts a fresh history.
+    history.push(.{ .position = @splat(0), .rotation = .{ .x = 0, .y = 0, .z = 0, .w = 1 }, .client_us = 5 });
+    try std.testing.expectEqual(@as(usize, 1), history.len);
     // A new client clock replaces the old mapping at once.
     offsets.add(2_000_000_000, 7_000_000_000);
     try std.testing.expectEqual(@as(i64, 7_000_000_000), offsets.min().?);
