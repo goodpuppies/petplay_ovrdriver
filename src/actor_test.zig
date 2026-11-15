@@ -131,4 +131,5 @@ test "single-eye capture bounds selection and stays inert without driver-direct"
 test {
     _ = @import("hmd.zig");
     _ = @import("pose_ring.zig");
+    _ = @import("controllers.zig");
 }

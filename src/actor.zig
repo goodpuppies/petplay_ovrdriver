@@ -245,17 +245,25 @@ fn parseCaptureDirectory(payload: Value) ![]const u8 {
     if (directory.len == 0 or directory[0] != '/' or directory.len > 1024) return error.ExpectedAbsoluteDirectory;
     return directory;
 }
-/// `{hand, position:[x,y,z], rotation:[x,y,z,w]}` holds a hand; `{hand, clear:true}` releases it.
+/// `{hand, position:[x,y,z], rotation:[x,y,z,w], velocity?, angularVelocity?, clientTimeUs?}`
+/// holds a hand; `{hand, clear:true}` releases it. With `clientTimeUs` (the client's sample
+/// time on its own clock) and velocities, each display frame shows the hand at a steady lag.
 fn parsePose(payload: Value) !struct { hand: usize, pose: ?@import("controllers.zig").HeldPose } {
     if (payload != .object) return error.ExpectedPoseObject;
-    try rejectUnknown(payload, &.{ "hand", "position", "rotation", "clear" });
+    try rejectUnknown(payload, &.{ "hand", "position", "rotation", "clear", "velocity", "angularVelocity", "clientTimeUs" });
     const hand = try parseHand(payload);
     if (optionalField(payload, "clear")) |v| if (v == .bool and v.bool) return .{ .hand = hand, .pose = null };
     const position = try finiteVector(3, try field(payload, "position"), 100);
     const q = try finiteVector(4, try field(payload, "rotation"), 2);
     const length = @sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     if (length < 0.5) return error.InvalidRotation;
-    return .{ .hand = hand, .pose = .{ .position = position, .rotation = .{ .x = q[0] / length, .y = q[1] / length, .z = q[2] / length, .w = q[3] / length } } };
+    return .{ .hand = hand, .pose = .{
+        .position = position,
+        .rotation = .{ .x = q[0] / length, .y = q[1] / length, .z = q[2] / length, .w = q[3] / length },
+        .velocity = if (optionalField(payload, "velocity")) |v| try finiteVector(3, v, 20) else @splat(0),
+        .angularVelocity = if (optionalField(payload, "angularVelocity")) |v| try finiteVector(3, v, 40) else @splat(0),
+        .client_us = if (optionalField(payload, "clientTimeUs")) |v| try uint64(v) else 0,
+    } };
 }
 /// `{position, rotation, velocity?, angularVelocity?}` holds the head; `{clear:true}` releases it.
 /// Velocities are tracking-space m/s and rad/s; SteamVR uses them to predict the head forward.

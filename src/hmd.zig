@@ -24,7 +24,8 @@ var ring: ?@import("pose_ring.zig").Ring = null;
 /// Publishes held poses beside the control socket for the media worker. Optional.
 pub fn attachPoseRing(directory_fd: i32) void {
     if (directory_fd < 0 or ring != null) return;
-    ring = @import("pose_ring.zig").open(directory_fd) catch null;
+    ring = @import("pose_ring.zig").open(directory_fd, "hmd-poses") catch null;
+    @import("controllers.zig").attachPoseRing(directory_fd);
 }
 var held_mutex: std.Io.Mutex = .init;
 var held: ?HeldPose = null;
@@ -223,6 +224,7 @@ fn poseLoop() void {
         // tick rather than up to one heartbeat later.
         if (before >= next_latch) {
             latch(before);
+            @import("controllers.zig").latchAndPublish();
             next_latch = nextTick(before + lead) - lead;
         }
         const pose = getPose(&device);

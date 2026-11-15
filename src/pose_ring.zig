@@ -41,9 +41,9 @@ pub const Ring = struct {
     }
 };
 
-/// Creates (or reuses) `hmd-poses` in the driver's private control directory.
-pub fn open(directory_fd: i32) !Ring {
-    const rc = linux.openat(directory_fd, "hmd-poses", .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
+/// Creates (or reuses) `name` (`hmd-poses`, `hand-poses`) in the driver's control directory.
+pub fn open(directory_fd: i32, name: [*:0]const u8) !Ring {
+    const rc = linux.openat(directory_fd, name, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, 0o600);
     if (linux.errno(rc) != .SUCCESS) return error.PoseRingOpen;
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
