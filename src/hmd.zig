@@ -1,5 +1,6 @@
 //! Opt-in fictional HMD and a separate clocked display-redirect sink.
 const std = @import("std");
+const camera = @import("camera.zig");
 const abi = @import("abi.zig");
 const sink = @import("virtual_display.zig");
 const direct = @import("direct.zig");
@@ -138,6 +139,7 @@ pub fn start(ctx: *abi.Context, h: *abi.Host) void {
     err = 0;
     const use_direct = settings.vtable.getBool(settings, "driver_petplay", "driverDirect", &err);
     direct.configure(ctx, h, err == 0 and use_direct);
+    if (camera.enabled()) camera.initQueue(ctx);
     if (!h.vtable.trackedDeviceAdded(h, "PETPLAY-SYNTHETIC-HMD-001", 1, &device) or
         (!direct.enabled.load(.acquire) and !profile.current.virtualDisplay and
             !h.vtable.trackedDeviceAdded(h, "PETPLAY-SYNTHETIC-DISPLAY-001", 5, &redirect_device))) failed.store(true, .release);
@@ -158,6 +160,31 @@ fn setProperty(comptime T: type, prop: i32, tag: u32, value: T) bool {
     var item: abi.PropertyWrite = .{ .prop = prop, .buffer = &value, .size = @sizeOf(T), .tag = tag };
     return p.vtable.writeBatch(p, p.vtable.container(p, index), @ptrCast(&item), 1) == 0 and item.err == 0;
 }
+/// Describes the synthetic passthrough camera (camera.zig). Firmware versions are reported
+/// high because Room View refuses cameras whose camera/FPGA/HMD firmware look too old.
+/// Failures are logged, not fatal: the headset works without its camera.
+fn cameraProperties() void {
+    const identity_ahead: [3][4]f32 = .{ .{ 1, 0, 0, 0 }, .{ 0, 1, 0, 0 }, .{ 0, 0, 1, -0.05 } };
+    const none: [1]i32 = .{0};
+    const coefficients: [8]f64 = @splat(0);
+    const white: [4]f32 = .{ 1, 1, 1, 1 };
+    const ok = setProperty(bool, 1030, 4, true) and // HasCamera
+        setProperty(bool, 1055, 4, true) and // AllowCameraToggle in SteamVR settings
+        setProperty(i32, 1039, 2, 1) and // NumCameras
+        setProperty(i32, 1040, 2, 1) and // CameraFrameLayout: mono
+        setProperty(i32, 1041, 2, @intFromEnum(camera.Format.rgbx32)) and // CameraStreamFormat
+        setProperty([3][4]f32, 2055, 20, identity_ahead) and // CameraToHeadTransforms
+        setProperty([1]i32, 2072, 2, none) and // CameraDistortionFunction: none
+        setProperty([8]f64, 2073, 1, coefficients) and // CameraDistortionCoefficients
+        setProperty([4]f32, 2071, 23, white) and // CameraWhiteBalance
+        setProperty(u64, 1018, 3, 2_000_000_000) and // FirmwareVersion
+        setProperty(u64, 1019, 3, 2_000_000_000) and // FPGAVersion
+        setProperty(u64, 2027, 3, 0x200040049) and // CameraFirmwareVersion
+        stringProperty(2028, "PetPlay synthetic key camera");
+    camera_properties_ok = ok;
+    camera.logProperties(ok);
+}
+pub var camera_properties_ok = false;
 fn stringProperty(prop: i32, value: [:0]const u8) bool {
     const p = properties orelse return false;
     var item: abi.PropertyWrite = .{ .prop = prop, .buffer = value.ptr, .size = @intCast(value.len + 1), .tag = 5 };
@@ -185,6 +212,8 @@ fn activate(_: *abi.Device, id: u32) callconv(.c) i32 {
         failed.store(true, .release);
         return abi.driver_failed;
     }
+    if (profile.current.framePassthrough and !setProperty(bool, 2105, 4, true)) return abi.driver_failed;
+    if (camera.enabled()) cameraProperties();
     if (direct.enabled.load(.acquire) and
         (!setProperty(bool, 2043, 4, true) or !setProperty(bool, 2116, 4, true)))
     {
@@ -203,6 +232,7 @@ fn activate(_: *abi.Device, id: u32) callconv(.c) i32 {
     return 0;
 }
 fn deactivate(_: *abi.Device) callconv(.c) void {
+    if (camera.enabled()) camera.stop();
     direct.stopClock();
     stop_requested.store(true, .release);
     if (thread) |t| t.join();
@@ -256,6 +286,10 @@ fn getPose(_: *abi.Device) callconv(.c) abi.Pose {
 }
 fn standby(_: *abi.Device) callconv(.c) void {}
 fn component(_: *abi.Device, name: [*:0]const u8) callconv(.c) ?*anyopaque {
+    if (camera.enabled() and std.mem.eql(u8, std.mem.span(name), camera.version)) {
+        camera.logLookup();
+        return &camera.object;
+    }
     if (direct.enabled.load(.acquire) and std.mem.eql(u8, std.mem.span(name), abi.direct_version)) return &direct.object;
     if (std.mem.eql(u8, std.mem.span(name), abi.display_version) or std.mem.eql(u8, std.mem.span(name), abi.display_legacy_version)) return &display;
     return null;

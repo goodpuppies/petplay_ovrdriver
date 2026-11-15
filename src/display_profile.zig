@@ -23,6 +23,12 @@ pub const Profile = struct {
     virtualDisplay: bool = false,
     edidVid: i32 = 0,
     edidPid: i32 = 0,
+    /// Nonzero (0xRRGGBB) gives the HMD a synthetic passthrough camera showing only this
+    /// colour (camera.zig), so passthrough regions arrive at a remote AR client keyed.
+    passthroughKeyRgb: i32 = 0,
+    /// Experimental Frame private DMA-BUF profile; excludes the legacy camera component.
+    /// A separate producer and a compositor camera reader are required to show an image.
+    framePassthrough: bool = false,
     pub const Tangents = struct { left: f32, right: f32, top: f32, bottom: f32 };
     /// OpenVR `GetProjectionRaw` values for eye 0 (left) or 1 (right).
     pub fn eyeTangents(self: Profile, eye: i32) Tangents {
@@ -74,7 +80,10 @@ pub fn load(s: *abi.Settings) !void {
         .fovTanUp = float(s, "fovTanUp", 1),
         .fovTanDown = float(s, "fovTanDown", 1),
         .poseLatchLeadUs = try integer(s, "poseLatchLeadUs", 2000),
+        .passthroughKeyRgb = rawInteger(s, "passthroughKeyRgb"),
+        .framePassthrough = boolean(s, "framePassthrough"),
     };
+    if (next.passthroughKeyRgb < 0 or next.passthroughKeyRgb > 0xffffff) return error.InvalidDisplayProfile;
     for ([_]f32{ next.fovTanLeft, next.fovTanRight, next.fovTanUp, next.fovTanDown }) |tan|
         if (!std.math.isFinite(tan) or tan < 0.1 or tan > 6) return error.InvalidDisplayProfile;
     if (next.maxSwapchainMiB < 64 or next.refreshHz < 30 or next.refreshHz > 240 or

@@ -132,4 +132,5 @@ test {
     _ = @import("hmd.zig");
     _ = @import("pose_ring.zig");
     _ = @import("controllers.zig");
+    _ = @import("camera.zig");
 }

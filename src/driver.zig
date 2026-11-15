@@ -10,7 +10,7 @@ var actor: actor_mod.Actor = .{ .process_owner = "steamvr" };
 var request_busy = std.atomic.Value(bool).init(false);
 var provider: abi.Provider = .{ .vtable = &provider_table.methods };
 var device: abi.Device = .{ .vtable = &device_table.methods };
-const versions = [_:null]?[*:0]const u8{ abi.provider_version, abi.device_version, abi.host_version, abi.display_version, abi.virtual_display_version, abi.display_legacy_version, abi.plugin_version, abi.direct_version, abi.resource_version };
+const versions = [_:null]?[*:0]const u8{ abi.provider_version, abi.device_version, abi.host_version, abi.display_version, abi.virtual_display_version, abi.display_legacy_version, abi.plugin_version, abi.direct_version, abi.resource_version, @import("camera.zig").version };
 const provider_table: abi.Table(abi.ProviderMethods) = .{ .methods = .{
     .init = init,
     .cleanup = cleanup,
@@ -47,6 +47,11 @@ fn init(_: *abi.Provider, context: ?*abi.Context) callconv(.c) i32 {
     const raw = ctx.vtable.getGenericInterface(ctx, abi.host_version, &err);
     if (err != 0 or raw == null) return if (err != 0) err else abi.interface_not_found;
     host = @ptrCast(@alignCast(raw.?));
+    {
+        var log_err: i32 = 0;
+        const log_raw = ctx.vtable.getGenericInterface(ctx, abi.log_version, &log_err);
+        @import("camera.zig").logger = if (log_err == 0 and log_raw != null) @ptrCast(@alignCast(log_raw.?)) else null;
+    }
     state.handle.store(ctx.vtable.getDriverHandle(ctx), .release);
     state.ticks.store(0, .monotonic);
     state.standby.store(false, .release);

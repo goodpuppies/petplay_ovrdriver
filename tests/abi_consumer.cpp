@@ -18,7 +18,7 @@
 #include <linux/sync_file.h>
 struct Settings final : vr::IVRSettings {
  bool enabled=false, controllers=false, direct=false;
- bool custom=false; int rate=90; bool virtualDisplay=false;
+ bool custom=false; int rate=90; bool virtualDisplay=false; int key=0; bool framePassthrough=false;
  const char *GetSettingsErrorNameFromEnum(vr::EVRSettingsError) override { return "test"; }
  void SetBool(const char*,const char*,bool,vr::EVRSettingsError*) override { assert(false); }
  void SetInt32(const char*,const char*,int32_t,vr::EVRSettingsError*) override { assert(false); }
@@ -27,6 +27,7 @@ struct Settings final : vr::IVRSettings {
  bool GetBool(const char *section,const char *key,vr::EVRSettingsError *err) override {
   assert(!std::strcmp(section,"driver_petplay"));
   if(err)*err=vr::VRSettingsError_None;
+  if(!std::strcmp(key,"framePassthrough"))return framePassthrough;
   if(!std::strcmp(key,"driverDirect"))return direct;
   if(!std::strcmp(key,"syntheticControllers"))return controllers;
   if(!std::strcmp(key,"virtualDisplay"))return virtualDisplay;
@@ -36,6 +37,7 @@ struct Settings final : vr::IVRSettings {
   assert(!std::strcmp(section,"driver_petplay"));
   if(!std::strcmp(key,"edidVid")){if(err)*err=vr::VRSettingsError_None;return 16908;}
   if(!std::strcmp(key,"edidPid")){if(err)*err=vr::VRSettingsError_None;return 20560;}
+  if(!std::strcmp(key,"passthroughKeyRgb")){if(err)*err=this->key?vr::VRSettingsError_None:vr::VRSettingsError_UnsetSettingHasNoDefault;return this->key;}
   if(err)*err=custom?vr::VRSettingsError_None:vr::VRSettingsError_UnsetSettingHasNoDefault;
   if(!custom)return 0;
   if(!std::strcmp(key,"renderWidth"))return 3562;
@@ -65,18 +67,22 @@ struct Settings final : vr::IVRSettings {
 };
 struct Properties final : vr::IVRProperties {
  unsigned writes=0; bool reject=false; float frequency=75;
- bool onDesktop=false, debugMode=false; int edidVid=0, edidPid=0;
+ bool roomViewDirect=false; bool onDesktop=false, debugMode=false; int edidVid=0, edidPid=0;
  vr::ETrackedPropertyError ReadPropertyBatch(vr::PropertyContainerHandle_t,vr::PropertyRead_t*,uint32_t) override { assert(false);return vr::TrackedProp_Success; }
  vr::ETrackedPropertyError WritePropertyBatch(vr::PropertyContainerHandle_t c,vr::PropertyWrite_t *batch,uint32_t count) override {
   assert(c>=123 && c<=126 && count==1);auto &b=*batch; assert(b.writeType==vr::PropertyWrite_Set && b.pvBuffer);
   if(reject)return vr::TrackedProp_InvalidOperation;
+  if(b.prop==vr::Prop_Hmd_SupportsRoomViewDirect_Bool)roomViewDirect=*static_cast<bool*>(b.pvBuffer);
   if(b.prop==vr::Prop_IsOnDesktop_Bool)onDesktop=*static_cast<bool*>(b.pvBuffer);
   if(b.prop==vr::Prop_DisplayDebugMode_Bool)debugMode=*static_cast<bool*>(b.pvBuffer);
   if(b.prop==vr::Prop_EdidVendorID_Int32)edidVid=*static_cast<int32_t*>(b.pvBuffer);
   if(b.prop==vr::Prop_EdidProductID_Int32)edidPid=*static_cast<int32_t*>(b.pvBuffer);
   switch(b.unTag) {
-   case vr::k_unFloatPropertyTag: assert(b.unBufferSize==sizeof(float));if(b.prop==vr::Prop_DisplayFrequency_Float)frequency=*static_cast<float*>(b.pvBuffer);break;
-   case vr::k_unInt32PropertyTag: assert(b.unBufferSize==sizeof(int32_t));break;
+   case vr::k_unFloatPropertyTag: assert(b.unBufferSize==sizeof(float) || (b.prop==vr::Prop_CameraDistortionCoefficients_Float_Array && b.unBufferSize==8*sizeof(double)));if(b.prop==vr::Prop_DisplayFrequency_Float)frequency=*static_cast<float*>(b.pvBuffer);break;
+   case vr::k_unInt32PropertyTag: assert(b.unBufferSize>0 && b.unBufferSize%sizeof(int32_t)==0);break; // arrays too
+   case vr::k_unDoublePropertyTag: assert(b.unBufferSize>0 && b.unBufferSize%sizeof(double)==0);break;
+   case vr::k_unHmdMatrix34PropertyTag: assert(b.unBufferSize>0 && b.unBufferSize%sizeof(vr::HmdMatrix34_t)==0);break;
+   case vr::k_unHmdVector4PropertyTag: assert(b.unBufferSize>0 && b.unBufferSize%sizeof(vr::HmdVector4_t)==0);break;
    case vr::k_unBoolPropertyTag: assert(b.unBufferSize==sizeof(bool));break;
    case vr::k_unUint64PropertyTag: assert(b.unBufferSize==sizeof(uint64_t));break;
    case vr::k_unStringPropertyTag: assert(b.unBufferSize==std::strlen(static_cast<char*>(b.pvBuffer))+1);break;
@@ -156,6 +162,7 @@ struct Context final : vr::IVRDriverContext {
   if(!std::strcmp(name,vr::IVRDriverLog_Version)) {if(err)*err=vr::VRInitError_None;return &log;}
   if(!std::strcmp(name,vr::IVRSettings_Version)) {if(err)*err=vr::VRInitError_None;return &settings;}
   if(!std::strcmp(name,vr::IVRProperties_Version)) {if(err)*err=vr::VRInitError_None;return &properties;}
+  if(!std::strcmp(name,"IVRBlockQueue_005") || !std::strcmp(name,"IVRPaths_002")) {if(err)*err=vr::VRInitError_Init_InterfaceNotFound;return nullptr;}
   requests++;assert(!std::strcmp(name,vr::IVRServerDriverHost_Version));
   if(err)*err=available?vr::VRInitError_None:vr::VRInitError_Init_InterfaceNotFound;
   return available?&host:nullptr;
@@ -191,7 +198,7 @@ int main(int argc,char **argv) {
  assert(!std::strcmp(p->GetInterfaceVersions()[0],vr::IServerTrackedDeviceProvider_Version));
  assert(!std::strcmp(p->GetInterfaceVersions()[1],vr::ITrackedDeviceServerDriver_Version));
  assert(!std::strcmp(p->GetInterfaceVersions()[3],vr::IVRDisplayComponent_Version));
- assert(!std::strcmp(p->GetInterfaceVersions()[4],vr::IVRVirtualDisplay_Version));assert(!std::strcmp(p->GetInterfaceVersions()[5],"IVRDisplayComponent_002"));assert(!std::strcmp(p->GetInterfaceVersions()[6],vr::IVRCompositorPluginProvider_Version));assert(!std::strcmp(p->GetInterfaceVersions()[7],vr::IVRDriverDirectModeComponent_Version));assert(!std::strcmp(p->GetInterfaceVersions()[8],vr::IVRIPCResourceManagerClient_Version));assert(p->GetInterfaceVersions()[9]==nullptr);
+ assert(!std::strcmp(p->GetInterfaceVersions()[4],vr::IVRVirtualDisplay_Version));assert(!std::strcmp(p->GetInterfaceVersions()[5],"IVRDisplayComponent_002"));assert(!std::strcmp(p->GetInterfaceVersions()[6],vr::IVRCompositorPluginProvider_Version));assert(!std::strcmp(p->GetInterfaceVersions()[7],vr::IVRDriverDirectModeComponent_Version));assert(!std::strcmp(p->GetInterfaceVersions()[8],vr::IVRIPCResourceManagerClient_Version));assert(!std::strcmp(p->GetInterfaceVersions()[9],vr::IVRCameraComponent_Version));assert(p->GetInterfaceVersions()[10]==nullptr);
  p->RunFrame();p->RunFrame();p->RunFrame();assert(ticks()==3);
  assert(!p->ShouldBlockStandbyMode());p->EnterStandby();assert(standby());p->LeaveStandby();assert(!standby());
  assert(symbol<size_t(*)()>(lib,"pp_test_pose_size")()==sizeof(vr::DriverPose_t));
@@ -221,6 +228,7 @@ int main(int argc,char **argv) {
  auto *display=static_cast<vr::IVRDisplayComponent*>(hmd->GetComponent(vr::IVRDisplayComponent_Version));assert(display);
  assert(!hmd->GetComponent("IVRDisplayComponent_999"));
  assert(hmd->GetComponent("IVRDisplayComponent_002")==display);
+ assert(!hmd->GetComponent(vr::IVRCameraComponent_Version)); // no passthrough key, no camera
  int32_t x,y;uint32_t w,h,ux,uy;display->GetWindowBounds(&x,&y,&w,&h);assert(x==0 && y==0 && w==1280 && h==720);
  assert(display->IsDisplayOnDesktop() && !display->IsDisplayRealDisplay());
  display->GetRecommendedRenderTargetSize(&w,&h);assert(w==640 && h==640);
@@ -239,6 +247,28 @@ int main(int argc,char **argv) {
  std::this_thread::sleep_for(std::chrono::milliseconds(35));assert(sink->GetTimeSinceLastVsync(&seconds,&frame));assert(frame>=after+2);
  p->Cleanup();assert(ctx.host.updates.load()>=2);assert(ctx.host.index==0 && ctx.host.pose.vecPosition[1]==1.6);
  auto previous=ctx.host.updates.load();std::this_thread::sleep_for(std::chrono::milliseconds(10));assert(ctx.host.updates==previous);
+ // Passthrough key camera: official-header dispatch, a frame in the requested format.
+ {ctx.settings.key=0xff00ff;assert(p->Init(&ctx)==0);
+  auto *camera=static_cast<vr::IVRCameraComponent*>(ctx.host.hmd->GetComponent(vr::IVRCameraComponent_Version));assert(camera);
+  uint32_t cw,ch;assert(camera->GetCameraFrameDimensions(vr::CVS_FORMAT_RGB24,&cw,&ch) && cw==640 && ch==480);
+  assert(!camera->GetCameraFrameDimensions(vr::CVS_FORMAT_MJPEG,&cw,&ch));
+  assert(camera->SetCameraVideoStreamFormat(vr::CVS_FORMAT_RGB24) && camera->GetCameraVideoStreamFormat()==vr::CVS_FORMAT_RGB24);
+  struct Sink final : vr::ICameraVideoSinkCallback { std::atomic<int> calls{0}; void OnCameraVideoSinkCallback() override { calls++; } } sink;
+  assert(camera->SetCameraVideoSinkCallback(&sink) && camera->StartVideoStream());
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  bool paused=true;float elapsed=0;assert(camera->IsVideoStreamActive(&paused,&elapsed) && !paused && elapsed>0);
+  auto *f=camera->GetVideoStreamFrame();assert(f && f->m_nStreamFormat==vr::CVS_FORMAT_RGB24 && f->m_nWidth==640 && f->m_nImageDataSize==640*480*3);
+  auto *px=reinterpret_cast<const uint8_t*>(f->m_pImageData);assert(px[0]==255 && px[1]==0 && px[2]==255 && px[640*480*3-2]==0);
+  camera->ReleaseVideoStreamFrame(f);assert(sink.calls>=2);
+  vr::HmdVector2_t focal,center;vr::EVRDistortionFunctionType kind;double coefficients[vr::k_unMaxDistortionFunctionParameters];
+  assert(camera->GetCameraIntrinsics(0,vr::VRTrackedCameraFrameType_Distorted,&focal,&center,&kind,coefficients) && kind==vr::VRDistortionFunctionType_None && center.v[0]==320);
+  camera->StopVideoStream();assert(!camera->IsVideoStreamActive(&paused,&elapsed));
+  p->Cleanup();ctx.settings.key=0;}
+ // Frame mode must not expose the legacy component: its Linux frame consumer can abort.
+ {ctx.settings.key=0xff00ff;ctx.settings.framePassthrough=true;assert(p->Init(&ctx)==0);
+  assert(ctx.properties.roomViewDirect);
+  assert(!ctx.host.hmd->GetComponent(vr::IVRCameraComponent_Version));
+  p->Cleanup();ctx.settings.key=0;ctx.settings.framePassthrough=false;}
  // Non-default geometry and clock cross the actual official-header ABI, then restore defaults.
  ctx.settings.custom=true;assert(p->Init(&ctx)==0);assert(ctx.properties.frequency==90);
  display=static_cast<vr::IVRDisplayComponent*>(ctx.host.hmd->GetComponent(vr::IVRDisplayComponent_Version));
