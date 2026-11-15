@@ -244,8 +244,8 @@ int main(int argc,char **argv) {
  display->GetRecommendedRenderTargetSize(&w,&h);assert(w==3562 && h==3562);
  display->GetWindowBounds(&x,&y,&w,&h);assert(w==5088 && h==2544);
  display->GetEyeOutputViewport(vr::Eye_Right,&ux,&uy,&w,&h);assert(ux==2544 && w==2544 && h==2544);
- {float l,r,t,b;display->GetProjectionRaw(vr::Eye_Left,&l,&r,&t,&b);assert(l==-1.25f && r==.875f && t==-1.125f && b==1.5f);
-  display->GetProjectionRaw(vr::Eye_Right,&l,&r,&t,&b);assert(l==-.875f && r==1.25f && t==-1.125f && b==1.5f);}
+ {float l,r,t,b;display->GetProjectionRaw(vr::Eye_Left,&l,&r,&t,&b);assert(l==-1.25f && r==.875f && t==-1.5f && b==1.125f);
+  display->GetProjectionRaw(vr::Eye_Right,&l,&r,&t,&b);assert(l==-.875f && r==1.25f && t==-1.5f && b==1.125f);}
  assert(sink->GetTimeSinceLastVsync(&seconds,&frame));
  std::this_thread::sleep_for(std::chrono::milliseconds(120));
  assert(sink->GetTimeSinceLastVsync(&seconds,&after));assert(after-frame>=10 && seconds<1.f/90);

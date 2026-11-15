@@ -26,7 +26,9 @@ pub const Profile = struct {
     pub fn eyeTangents(self: Profile, eye: i32) Tangents {
         const inner = if (eye == 0) self.fovTanRight else self.fovTanLeft;
         const outer = if (eye == 0) self.fovTanLeft else self.fovTanRight;
-        return .{ .left = -outer, .right = inner, .top = -self.fovTanUp, .bottom = self.fovTanDown };
+        // SteamVR's raw "top" is the image's downward edge: measured with a head-locked marker
+        // in the headless stream (markdown/webxr-client.md), not inferred from the name.
+        return .{ .left = -outer, .right = inner, .top = -self.fovTanDown, .bottom = self.fovTanUp };
     }
 };
 pub var current: Profile = .{};

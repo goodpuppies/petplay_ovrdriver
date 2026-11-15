@@ -236,7 +236,8 @@ fn viewport(_: *abi.Display, eye: i32, x: *u32, y: *u32, w: *u32, h: *u32) callc
     w.* = profile.current.displayEyeWidth;
     h.* = profile.current.displayEyeHeight;
 }
-/// OpenVR raw tangents: left and top negative. The right eye mirrors the left horizontally.
+/// OpenVR raw tangents: left and top negative, where top is the downward edge. The right eye
+/// mirrors the left horizontally.
 fn projection(_: *abi.Display, eye: i32, l: *f32, r: *f32, t: *f32, b: *f32) callconv(.c) void {
     const tan = profile.current.eyeTangents(eye);
     l.* = tan.left;
