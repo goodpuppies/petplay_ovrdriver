@@ -73,6 +73,11 @@ pub const Actor = struct {
             controllers.hold(parsed_pose.hand, parsed_pose.pose) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
             return if (colon == null) null else try reply(allocator, me, from, typ, .{ .accepted = true });
         }
+        if (std.mem.eql(u8, base, "SETHMDPOSE")) {
+            const parsed_pose = parseHmdPose(payload) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
+            @import("hmd.zig").hold(parsed_pose) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
+            return if (colon == null) null else try reply(allocator, me, from, typ, .{ .accepted = true });
+        }
         if (std.mem.eql(u8, base, "SETCONTROLLERINPUT")) {
             const controllers = @import("controllers.zig");
             const parsed_input = parseInput(payload) catch |err| return if (colon == null) null else try commandError(allocator, me, from, typ, @errorName(err));
@@ -113,6 +118,8 @@ pub const Actor = struct {
                 .syntheticHmdActive = @import("hmd.zig").active.load(.acquire),
                 .syntheticHmdFailed = @import("hmd.zig").failed.load(.acquire),
                 .syntheticPoseUpdates = @import("hmd.zig").pose_updates.load(.monotonic),
+                .syntheticHmdHeld = @import("hmd.zig").isHeld(),
+                .syntheticHmdHeldUpdates = @import("hmd.zig").held_updates.load(.monotonic),
                 .virtualPresents = @import("virtual_display.zig").presents.load(.monotonic),
                 .virtualTimingQueries = @import("virtual_display.zig").timing_queries.load(.monotonic),
                 .virtualWaits = @import("virtual_display.zig").waits.load(.monotonic),
@@ -249,6 +256,23 @@ fn parsePose(payload: Value) !struct { hand: usize, pose: ?@import("controllers.
     const length = @sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     if (length < 0.5) return error.InvalidRotation;
     return .{ .hand = hand, .pose = .{ .position = position, .rotation = .{ .x = q[0] / length, .y = q[1] / length, .z = q[2] / length, .w = q[3] / length } } };
+}
+/// `{position, rotation, velocity?, angularVelocity?}` holds the head; `{clear:true}` releases it.
+/// Velocities are tracking-space m/s and rad/s; SteamVR uses them to predict the head forward.
+fn parseHmdPose(payload: Value) !?@import("hmd.zig").HeldPose {
+    if (payload != .object) return error.ExpectedPoseObject;
+    try rejectUnknown(payload, &.{ "position", "rotation", "velocity", "angularVelocity", "clear" });
+    if (optionalField(payload, "clear")) |v| if (v == .bool and v.bool) return null;
+    const position = try finiteVector(3, try field(payload, "position"), 100);
+    const q = try finiteVector(4, try field(payload, "rotation"), 2);
+    const length = @sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (length < 0.5) return error.InvalidRotation;
+    return .{
+        .position = position,
+        .rotation = .{ .x = q[0] / length, .y = q[1] / length, .z = q[2] / length, .w = q[3] / length },
+        .velocity = if (optionalField(payload, "velocity")) |v| try finiteVector(3, v, 20) else @splat(0),
+        .angularVelocity = if (optionalField(payload, "angularVelocity")) |v| try finiteVector(3, v, 40) else @splat(0),
+    };
 }
 /// The complete input state for one hand; omitted controls are released.
 fn parseInput(payload: Value) !struct { hand: usize, state: @import("controllers.zig").InputState } {

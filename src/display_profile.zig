@@ -9,11 +9,25 @@ pub const Profile = struct {
     refreshHz: u32 = 75,
     maxSwapchainMiB: u32 = 512,
     ipdMeters: f32 = 0.064,
+    /// Left-eye field of view as positive tangents; the right eye mirrors it horizontally.
+    /// The default 1 is 90 degrees in each direction. A WebXR client sets these to its own
+    /// view frustum so the streamed image covers exactly what its headset shows.
+    fovTanLeft: f32 = 1,
+    fovTanRight: f32 = 1,
+    fovTanUp: f32 = 1,
+    fovTanDown: f32 = 1,
     /// Ask SteamVR to treat this HMD as a real direct-mode display instead of forcing its
     /// debug-mirror path. Requires a DRM connector whose EDID matches `edidVid`/`edidPid`.
     virtualDisplay: bool = false,
     edidVid: i32 = 0,
     edidPid: i32 = 0,
+    pub const Tangents = struct { left: f32, right: f32, top: f32, bottom: f32 };
+    /// OpenVR `GetProjectionRaw` values for eye 0 (left) or 1 (right).
+    pub fn eyeTangents(self: Profile, eye: i32) Tangents {
+        const inner = if (eye == 0) self.fovTanRight else self.fovTanLeft;
+        const outer = if (eye == 0) self.fovTanLeft else self.fovTanRight;
+        return .{ .left = -outer, .right = inner, .top = -self.fovTanUp, .bottom = self.fovTanDown };
+    }
 };
 pub var current: Profile = .{};
 fn integer(s: *abi.Settings, key: [*:0]const u8, fallback: u32) !u32 {
@@ -28,6 +42,11 @@ fn rawInteger(s: *abi.Settings, key: [*:0]const u8) i32 {
     var err: i32 = 0;
     const value = s.vtable.getInt32(s, "driver_petplay", key, &err);
     return if (err == 0) value else 0;
+}
+fn float(s: *abi.Settings, key: [*:0]const u8, fallback: f32) f32 {
+    var err: i32 = 0;
+    const value = s.vtable.getFloat(s, "driver_petplay", key, &err);
+    return if (err == 0) value else fallback;
 }
 fn boolean(s: *abi.Settings, key: [*:0]const u8) bool {
     var err: i32 = 0;
@@ -45,12 +64,14 @@ pub fn load(s: *abi.Settings) !void {
         .displayEyeHeight = try integer(s, "displayEyeHeight", 720),
         .refreshHz = try integer(s, "refreshHz", 75),
         .maxSwapchainMiB = try integer(s, "maxSwapchainMiB", 512),
-        .ipdMeters = blk: {
-            var err: i32 = 0;
-            const value = s.vtable.getFloat(s, "driver_petplay", "ipdMeters", &err);
-            break :blk if (err == 0) value else 0.064;
-        },
+        .ipdMeters = float(s, "ipdMeters", 0.064),
+        .fovTanLeft = float(s, "fovTanLeft", 1),
+        .fovTanRight = float(s, "fovTanRight", 1),
+        .fovTanUp = float(s, "fovTanUp", 1),
+        .fovTanDown = float(s, "fovTanDown", 1),
     };
+    for ([_]f32{ next.fovTanLeft, next.fovTanRight, next.fovTanUp, next.fovTanDown }) |tan|
+        if (!std.math.isFinite(tan) or tan < 0.1 or tan > 6) return error.InvalidDisplayProfile;
     if (next.maxSwapchainMiB < 64 or next.refreshHz < 30 or next.refreshHz > 240 or
         (next.virtualDisplay and (next.edidVid < 1 or next.edidVid > 0x7fff or
             next.edidPid < 1 or next.edidPid > 0xffff)) or

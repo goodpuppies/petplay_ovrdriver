@@ -9,6 +9,29 @@ pub var enabled = std.atomic.Value(bool).init(false);
 pub var active = std.atomic.Value(bool).init(false);
 pub var failed = std.atomic.Value(bool).init(false);
 pub var pose_updates = std.atomic.Value(u64).init(0);
+/// A remote head (WebXR client, agent) replaces the fixed standing pose until cleared.
+pub const HeldPose = struct {
+    position: [3]f64,
+    rotation: abi.Quaternion,
+    velocity: [3]f64 = @splat(0),
+    angularVelocity: [3]f64 = @splat(0),
+};
+var held_mutex: std.Io.Mutex = .init;
+var held: ?HeldPose = null;
+pub var held_updates = std.atomic.Value(u64).init(0);
+/// Holds the head at `pose`, or returns it to the fixed default when null.
+pub fn hold(pose: ?HeldPose) !void {
+    if (!enabled.load(.acquire)) return error.HmdDisabled;
+    std.Io.Threaded.mutexLock(&held_mutex);
+    defer std.Io.Threaded.mutexUnlock(&held_mutex);
+    held = pose;
+    _ = held_updates.fetchAdd(1, .monotonic);
+}
+pub fn isHeld() bool {
+    std.Io.Threaded.mutexLock(&held_mutex);
+    defer std.Io.Threaded.mutexUnlock(&held_mutex);
+    return held != null;
+}
 var stop_requested = std.atomic.Value(bool).init(false);
 var thread: ?std.Thread = null;
 var host: ?*abi.Host = null;
@@ -89,6 +112,9 @@ pub fn stop() void {
     host = null;
     properties = null;
     enabled.store(false, .release);
+    std.Io.Threaded.mutexLock(&held_mutex);
+    held = null;
+    std.Io.Threaded.mutexUnlock(&held_mutex);
 }
 fn setProperty(comptime T: type, prop: i32, tag: u32, value: T) bool {
     const p = properties orelse return false;
@@ -169,7 +195,15 @@ fn poseLoop() void {
     }
 }
 fn getPose(_: *abi.Device) callconv(.c) abi.Pose {
-    return .{ .vecPosition = .{ 0, 1.6, 0 } };
+    std.Io.Threaded.mutexLock(&held_mutex);
+    defer std.Io.Threaded.mutexUnlock(&held_mutex);
+    const pose = held orelse return .{ .vecPosition = .{ 0, 1.6, 0 } };
+    return .{
+        .vecPosition = pose.position,
+        .qRotation = pose.rotation,
+        .vecVelocity = pose.velocity,
+        .vecAngularVelocity = pose.angularVelocity,
+    };
 }
 fn standby(_: *abi.Device) callconv(.c) void {}
 fn component(_: *abi.Device, name: [*:0]const u8) callconv(.c) ?*anyopaque {
@@ -202,11 +236,13 @@ fn viewport(_: *abi.Display, eye: i32, x: *u32, y: *u32, w: *u32, h: *u32) callc
     w.* = profile.current.displayEyeWidth;
     h.* = profile.current.displayEyeHeight;
 }
-fn projection(_: *abi.Display, _: i32, l: *f32, r: *f32, t: *f32, b: *f32) callconv(.c) void {
-    l.* = -1;
-    r.* = 1;
-    t.* = -1;
-    b.* = 1;
+/// OpenVR raw tangents: left and top negative. The right eye mirrors the left horizontally.
+fn projection(_: *abi.Display, eye: i32, l: *f32, r: *f32, t: *f32, b: *f32) callconv(.c) void {
+    const tan = profile.current.eyeTangents(eye);
+    l.* = tan.left;
+    r.* = tan.right;
+    t.* = tan.top;
+    b.* = tan.bottom;
 }
 fn distortion(_: *abi.Display, _: i32, u: f32, v: f32) callconv(.c) abi.Distortion {
     return .{ .red = .{ u, v }, .green = .{ u, v }, .blue = .{ u, v } };
@@ -215,4 +251,22 @@ fn inverse(_: *abi.Display, result: *abi.Vector2, _: i32, channel: u32, u: f32, 
     if (channel > 2) return false;
     result.* = .{ .v = .{ u, v } };
     return true;
+}
+
+test "a held head pose replaces the fixed standing pose until cleared" {
+    try std.testing.expectError(error.HmdDisabled, hold(null));
+    enabled.store(true, .release);
+    defer {
+        held = null;
+        enabled.store(false, .release);
+    }
+    try std.testing.expectEqual(@as(f64, 1.6), getPose(&device).vecPosition[1]);
+    try hold(.{ .position = .{ 0.1, 1.7, -0.2 }, .rotation = .{ .w = 0.5, .x = 0.5, .y = 0.5, .z = 0.5 }, .velocity = .{ 0, 0, 1 } });
+    const pose = getPose(&device);
+    try std.testing.expect(isHeld());
+    try std.testing.expectEqual(@as(f64, -0.2), pose.vecPosition[2]);
+    try std.testing.expectEqual(@as(f64, 0.5), pose.qRotation.y);
+    try std.testing.expectEqual(@as(f64, 1), pose.vecVelocity[2]);
+    try hold(null);
+    try std.testing.expectEqual(@as(f64, 1.6), getPose(&device).vecPosition[1]);
 }

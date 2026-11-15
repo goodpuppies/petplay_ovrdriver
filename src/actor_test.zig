@@ -85,6 +85,17 @@ test "held poses and scripted inputs validate their payloads" {
         ,
         // Valid, but the controllers are not running in this test.
         \\"SETCONTROLLERINPUT:t","payload":{"hand":"right","grip":1,"joystick":[0,-1]}
+        ,
+        \\"SETHMDPOSE:t","payload":{"position":[0,1.6],"rotation":[0,0,0,1]}
+        ,
+        \\"SETHMDPOSE:t","payload":{"position":[0,1.6,0],"rotation":[0,0,0,0]}
+        ,
+        \\"SETHMDPOSE:t","payload":{"position":[0,1.6,0],"rotation":[0,0,0,1],"hand":"left"}
+        ,
+        \\"SETHMDPOSE:t","payload":{"position":[0,1.6,0],"rotation":[0,0,0,1],"velocity":[0,0,99]}
+        ,
+        // Valid, but the synthetic HMD is not enabled in this test.
+        \\"SETHMDPOSE:t","payload":{"position":[0,1.6,0],"rotation":[0,0,0,1],"velocity":[0,0,1],"angularVelocity":[0,1,0]}
     }) |body| {
         const packet = try std.fmt.allocPrint(a, "{{\"kind\":\"message\",\"data\":{{\"address\":{{\"fm\":\"test@x\",\"to\":\"driver@00000000-0000-0000-0000-000000000001\"}},\"type\":{s}}}}}", .{body});
         defer a.free(packet);
@@ -113,4 +124,8 @@ test "single-eye capture bounds selection and stays inert without driver-direct"
         defer a.free(response);
         try std.testing.expect(std.mem.indexOf(u8, response, c.expected) != null);
     }
+}
+
+test {
+    _ = @import("hmd.zig");
 }

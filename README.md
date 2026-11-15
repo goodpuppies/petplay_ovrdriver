@@ -16,7 +16,7 @@ behavior can be implemented as actors alongside the rest of PetPlay.
 
 | Capability | Current implementation |
 | --- | --- |
-| Synthetic headset | Fixed head pose, configurable opt-in activation, 75 Hz display profile and native timing. |
+| Synthetic headset | Fixed head pose unless held by `SETHMDPOSE`; configurable opt-in activation, display profile (size, rate, IPD, per-eye FOV tangents) and native timing. |
 | Synthetic controllers | Left/right devices sampled at 250 Hz; stationary, sine and constant-speed sweep trajectories with analytic derivatives. |
 | Actor control | Attach to the driver already running inside SteamVR; inspect health/device state and queue trajectory changes. |
 | Real applications | SteamVR and VRChat have run with the synthetic devices; VRChat initialized in VR and loaded its home world. |
@@ -71,6 +71,14 @@ The next pieces for a useful embodied agent are:
 Image transport should preserve native GPU resources or use a dedicated observation stream;
 large image frames do not belong in the bounded JSON control messages. The transport and
 ownership boundaries are described in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Remote head
+
+`SETHMDPOSE {position:[x,y,z], rotation:[x,y,z,w], velocity?, angularVelocity?}` holds the
+synthetic head in raw tracking space (metres, m/s, rad/s) until `{clear:true}`. The display
+profile's `fovTanLeft/Right/Up/Down` settings (left eye, positive tangents, default 1; the right
+eye is mirrored) set `GetProjectionRaw`. PetPlay's WebXR client drives both; see
+[../../markdown/webxr-client.md](../../markdown/webxr-client.md).
 
 ## Single-eye desktop observation
 

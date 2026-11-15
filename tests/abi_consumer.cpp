@@ -45,8 +45,14 @@ struct Settings final : vr::IVRSettings {
   assert(!std::strcmp(key,"refreshHz"));return rate;
  }
  float GetFloat(const char *section,const char *key,vr::EVRSettingsError *err) override {
-  assert(!std::strcmp(section,"driver_petplay") && !std::strcmp(key,"ipdMeters"));
+  assert(!std::strcmp(section,"driver_petplay"));
   if(err)*err=custom?vr::VRSettingsError_None:vr::VRSettingsError_UnsetSettingHasNoDefault;
+  // An asymmetric WebXR-style left-eye frustum; the driver mirrors it for the right eye.
+  if(!std::strcmp(key,"fovTanLeft"))return 1.25f;
+  if(!std::strcmp(key,"fovTanRight"))return .875f;
+  if(!std::strcmp(key,"fovTanUp"))return 1.125f;
+  if(!std::strcmp(key,"fovTanDown"))return 1.5f;
+  assert(!std::strcmp(key,"ipdMeters"));
   return .068f;
  }
  void GetString(const char *section,const char *key,char *out,uint32_t size,vr::EVRSettingsError *err) override {
@@ -238,6 +244,8 @@ int main(int argc,char **argv) {
  display->GetRecommendedRenderTargetSize(&w,&h);assert(w==3562 && h==3562);
  display->GetWindowBounds(&x,&y,&w,&h);assert(w==5088 && h==2544);
  display->GetEyeOutputViewport(vr::Eye_Right,&ux,&uy,&w,&h);assert(ux==2544 && w==2544 && h==2544);
+ {float l,r,t,b;display->GetProjectionRaw(vr::Eye_Left,&l,&r,&t,&b);assert(l==-1.25f && r==.875f && t==-1.125f && b==1.5f);
+  display->GetProjectionRaw(vr::Eye_Right,&l,&r,&t,&b);assert(l==-.875f && r==1.25f && t==-1.125f && b==1.5f);}
  assert(sink->GetTimeSinceLastVsync(&seconds,&frame));
  std::this_thread::sleep_for(std::chrono::milliseconds(120));
  assert(sink->GetTimeSinceLastVsync(&seconds,&after));assert(after-frame>=10 && seconds<1.f/90);
