@@ -94,6 +94,8 @@ test "held poses and scripted inputs validate their payloads" {
         ,
         \\"SETHMDPOSE:t","payload":{"position":[0,1.6,0],"rotation":[0,0,0,1],"velocity":[0,0,99]}
         ,
+        \\"SETHMDPOSE:t","payload":{"position":[0,1.6,0],"rotation":[0,0,0,1],"sequence":-4}
+        ,
         // Valid, but the synthetic HMD is not enabled in this test.
         \\"SETHMDPOSE:t","payload":{"position":[0,1.6,0],"rotation":[0,0,0,1],"velocity":[0,0,1],"angularVelocity":[0,1,0]}
     }) |body| {
@@ -128,4 +130,5 @@ test "single-eye capture bounds selection and stays inert without driver-direct"
 
 test {
     _ = @import("hmd.zig");
+    _ = @import("pose_ring.zig");
 }

@@ -15,9 +15,23 @@ pub const HeldPose = struct {
     rotation: abi.Quaternion,
     velocity: [3]f64 = @splat(0),
     angularVelocity: [3]f64 = @splat(0),
+    /// The client's own counter, echoed through the pose ring for latency measurement.
+    sequence: u64 = 0,
+    /// When the driver received it (CLOCK_MONOTONIC), recorded for latency breakdowns.
+    held_ns: u64 = 0,
 };
+var ring: ?@import("pose_ring.zig").Ring = null;
+/// Publishes held poses beside the control socket for the media worker. Optional.
+pub fn attachPoseRing(directory_fd: i32) void {
+    if (directory_fd < 0 or ring != null) return;
+    ring = @import("pose_ring.zig").open(directory_fd) catch null;
+}
 var held_mutex: std.Io.Mutex = .init;
 var held: ?HeldPose = null;
+/// What SteamVR sees while the device runs: `held` copied once per display frame, just before
+/// each display tick. Every frame the compositor renders therefore has exactly one head pose,
+/// and the pose ring records it with its latch time for the media worker to tag frames with.
+var latched: ?HeldPose = null;
 pub var held_updates = std.atomic.Value(u64).init(0);
 /// Holds the head at `pose`, or returns it to the fixed default when null.
 pub fn hold(pose: ?HeldPose) !void {
@@ -25,7 +39,28 @@ pub fn hold(pose: ?HeldPose) !void {
     std.Io.Threaded.mutexLock(&held_mutex);
     defer std.Io.Threaded.mutexUnlock(&held_mutex);
     held = pose;
+    if (held) |*h| h.held_ns = sink.nowNs();
     _ = held_updates.fetchAdd(1, .monotonic);
+}
+/// Publishes the newest held pose as the one SteamVR renders with. Called by the pose loop.
+fn latch(now: u64) void {
+    std.Io.Threaded.mutexLock(&held_mutex);
+    defer std.Io.Threaded.mutexUnlock(&held_mutex);
+    latched = held;
+    if (held) |p| if (ring) |r| r.write(.{
+        .time_ns = now,
+        .client_sequence = p.sequence,
+        .rotation = .{ @floatCast(p.rotation.x), @floatCast(p.rotation.y), @floatCast(p.rotation.z), @floatCast(p.rotation.w) },
+        .position = .{ @floatCast(p.position[0]), @floatCast(p.position[1]), @floatCast(p.position[2]) },
+        .held_ns = p.held_ns,
+    });
+}
+/// The first display tick after `now`, on the same absolute CLOCK_MONOTONIC grid the headless
+/// display layer uses: tick k is at ceil(k / hz) seconds.
+fn nextTick(now: u64) u64 {
+    const hz: u128 = profile.current.refreshHz;
+    const k = @as(u128, now) * hz / 1_000_000_000 + 1;
+    return @intCast((k * 1_000_000_000 + hz - 1) / hz);
 }
 pub fn isHeld() bool {
     std.Io.Threaded.mutexLock(&held_mutex);
@@ -114,6 +149,7 @@ pub fn stop() void {
     enabled.store(false, .release);
     std.Io.Threaded.mutexLock(&held_mutex);
     held = null;
+    latched = null;
     std.Io.Threaded.mutexUnlock(&held_mutex);
 }
 fn setProperty(comptime T: type, prop: i32, tag: u32, value: T) bool {
@@ -179,7 +215,16 @@ fn poseLoop() void {
         failed.store(true, .release);
         return;
     }
+    const lead: u64 = @as(u64, profile.current.poseLatchLeadUs) * 1000;
+    var next_latch: u64 = 0;
     while (!stop_requested.load(.acquire)) {
+        const before = sink.nowNs();
+        // Latch on time, then push immediately, so the new pose reaches vrserver before the
+        // tick rather than up to one heartbeat later.
+        if (before >= next_latch) {
+            latch(before);
+            next_latch = nextTick(before + lead) - lead;
+        }
         const pose = getPose(&device);
         host.?.vtable.trackedDevicePoseUpdated(host.?, index, &pose, @sizeOf(abi.Pose));
         _ = pose_updates.fetchAdd(1, .monotonic);
@@ -188,8 +233,9 @@ fn poseLoop() void {
             failed.store(true, .release);
             return;
         }
-        // Absolute monotonic grid; missed slots are skipped rather than burst-replayed.
-        const next = epoch_ns + ((now -| epoch_ns) / 4_000_000 + 1) * 4_000_000;
+        // A 4 ms heartbeat grid, interrupted by the next latch; missed slots are skipped.
+        const heartbeat = epoch_ns + ((now -| epoch_ns) / 4_000_000 + 1) * 4_000_000;
+        const next = @min(heartbeat, next_latch);
         const deadline: linux.timespec = .{ .sec = @intCast(next / 1_000_000_000), .nsec = @intCast(next % 1_000_000_000) };
         while (linux.errno(linux.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = true }, &deadline, null)) == .INTR) {}
     }
@@ -197,7 +243,8 @@ fn poseLoop() void {
 fn getPose(_: *abi.Device) callconv(.c) abi.Pose {
     std.Io.Threaded.mutexLock(&held_mutex);
     defer std.Io.Threaded.mutexUnlock(&held_mutex);
-    const pose = held orelse return .{ .vecPosition = .{ 0, 1.6, 0 } };
+    // A running device shows the latched pose; before the loop starts, the held one.
+    const pose = (if (active.load(.acquire)) latched else held) orelse return .{ .vecPosition = .{ 0, 1.6, 0 } };
     return .{
         .vecPosition = pose.position,
         .qRotation = pose.rotation,
@@ -270,4 +317,26 @@ test "a held head pose replaces the fixed standing pose until cleared" {
     try std.testing.expectEqual(@as(f64, 1), pose.vecVelocity[2]);
     try hold(null);
     try std.testing.expectEqual(@as(f64, 1.6), getPose(&device).vecPosition[1]);
+}
+
+test "latching copies the held pose and ticks follow the display grid" {
+    enabled.store(true, .release);
+    active.store(true, .release);
+    defer {
+        held = null;
+        latched = null;
+        active.store(false, .release);
+        enabled.store(false, .release);
+    }
+    try hold(.{ .position = .{ 0, 1.7, 0 }, .rotation = .{}, .sequence = 9 });
+    // Held but not yet latched: SteamVR still sees the standing default.
+    try std.testing.expectEqual(@as(f64, 1.6), getPose(&device).vecPosition[1]);
+    latch(123);
+    try std.testing.expectEqual(@as(f64, 1.7), getPose(&device).vecPosition[1]);
+    profile.current.refreshHz = 72;
+    defer profile.current = .{};
+    // 72 Hz: tick 1 at 13888889 ns (rounded up), tick 72 at exactly one second.
+    try std.testing.expectEqual(@as(u64, 13_888_889), nextTick(0));
+    try std.testing.expectEqual(@as(u64, 1_000_000_000), nextTick(999_999_999));
+    try std.testing.expectEqual(@as(u64, 1_013_888_889), nextTick(1_000_000_000));
 }

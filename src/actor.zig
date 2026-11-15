@@ -261,7 +261,7 @@ fn parsePose(payload: Value) !struct { hand: usize, pose: ?@import("controllers.
 /// Velocities are tracking-space m/s and rad/s; SteamVR uses them to predict the head forward.
 fn parseHmdPose(payload: Value) !?@import("hmd.zig").HeldPose {
     if (payload != .object) return error.ExpectedPoseObject;
-    try rejectUnknown(payload, &.{ "position", "rotation", "velocity", "angularVelocity", "clear" });
+    try rejectUnknown(payload, &.{ "position", "rotation", "velocity", "angularVelocity", "clear", "sequence" });
     if (optionalField(payload, "clear")) |v| if (v == .bool and v.bool) return null;
     const position = try finiteVector(3, try field(payload, "position"), 100);
     const q = try finiteVector(4, try field(payload, "rotation"), 2);
@@ -272,6 +272,7 @@ fn parseHmdPose(payload: Value) !?@import("hmd.zig").HeldPose {
         .rotation = .{ .x = q[0] / length, .y = q[1] / length, .z = q[2] / length, .w = q[3] / length },
         .velocity = if (optionalField(payload, "velocity")) |v| try finiteVector(3, v, 20) else @splat(0),
         .angularVelocity = if (optionalField(payload, "angularVelocity")) |v| try finiteVector(3, v, 40) else @splat(0),
+        .sequence = if (optionalField(payload, "sequence")) |v| try uint64(v) else 0,
     };
 }
 /// The complete input state for one hand; omitted controls are released.
@@ -311,6 +312,12 @@ fn parseCaptureEye(payload: Value) !struct { directory: []const u8, layer: usize
     const max_edge = if (optionalField(payload, "maxEdge")) |x| try uint(x, 1920) else 1024;
     if (max_edge < 256) return error.InvalidCaptureSize;
     return .{ .directory = directory, .layer = @intCast(layer), .eye = @intCast(eye), .max_edge = @intCast(max_edge) };
+}
+fn uint64(v: Value) !u64 {
+    return switch (v) {
+        .integer => |n| if (n < 0) error.InvalidUnsignedInteger else @intCast(n),
+        else => error.InvalidUnsignedInteger,
+    };
 }
 fn uint(v: Value, maximum: u32) !u32 {
     const n = try number(v);

@@ -16,6 +16,8 @@ pub const Profile = struct {
     fovTanRight: f32 = 1,
     fovTanUp: f32 = 1,
     fovTanDown: f32 = 1,
+    /// How long before each display tick the head pose is latched for that frame.
+    poseLatchLeadUs: u32 = 2000,
     /// Ask SteamVR to treat this HMD as a real direct-mode display instead of forcing its
     /// debug-mirror path. Requires a DRM connector whose EDID matches `edidVid`/`edidPid`.
     virtualDisplay: bool = false,
@@ -71,6 +73,7 @@ pub fn load(s: *abi.Settings) !void {
         .fovTanRight = float(s, "fovTanRight", 1),
         .fovTanUp = float(s, "fovTanUp", 1),
         .fovTanDown = float(s, "fovTanDown", 1),
+        .poseLatchLeadUs = try integer(s, "poseLatchLeadUs", 2000),
     };
     for ([_]f32{ next.fovTanLeft, next.fovTanRight, next.fovTanUp, next.fovTanDown }) |tan|
         if (!std.math.isFinite(tan) or tan < 0.1 or tan > 6) return error.InvalidDisplayProfile;

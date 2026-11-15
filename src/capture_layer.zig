@@ -106,6 +106,14 @@ fn createInstance(ci: [*c]const v.VkInstanceCreateInfo, alloc: [*c]const v.VkAll
     chain.*.u.pLayerInfo = link.*.pNext;
     const next: fnType("vkCreateInstance") = @ptrCast(gipa.?(null, "vkCreateInstance").?);
     headless_enabled = if (getenv("PP_HEADLESS_DISPLAY")) |flag| std.mem.eql(u8, std.mem.span(flag), "1") else false;
+    if (headless_enabled) if (getenv("PP_HEADLESS_MODE")) |text| {
+        headless_mode = parseHeadlessMode(std.mem.span(text)) orelse {
+            log("invalid PP_HEADLESS_MODE (expected WIDTHxHEIGHT@HZ)", .{});
+            return v.VK_ERROR_INITIALIZATION_FAILED;
+        };
+    };
+    media.width = headless_mode.width;
+    media.height = headless_mode.height;
     var local = ci.*;
     var extensions: [64][*c]const u8 = undefined;
     if (headless_enabled) {
@@ -120,7 +128,7 @@ fn createInstance(ci: [*c]const v.VkInstanceCreateInfo, alloc: [*c]const v.VkAll
             local.enabledExtensionCount += 1;
             local.ppEnabledExtensionNames = &extensions;
         }
-        log("userspace display enabled: 1920x1080@75; real Mesa headless swapchain", .{});
+        log("userspace display enabled: {d}x{d}@{d}; real Mesa headless swapchain", .{ headless_mode.width, headless_mode.height, headless_mode.hz });
     }
     const result = next(if (headless_enabled) &local else ci, alloc, out);
     if (result == v.VK_SUCCESS) {
@@ -1412,7 +1420,7 @@ fn queuePresent(q: v.VkQueue, info: [*c]const v.VkPresentInfoKHR) callconv(.c) v
             log("present swapchain={x} kind={s} {d}x{d} n={d} imageIndex={d} waits={d} chains={d} queue={x} family={?d}", .{ @intFromPtr(chain), s.kind.text(), s.width, s.height, s.presents, index, waits, chains, @intFromPtr(q), family });
         }
         if (media.requested() and chains == 1 and s.kind == .headless and
-            s.width == 1920 and s.height == 1080 and s.format == v.VK_FORMAT_B8G8R8A8_UNORM and
+            s.width == headless_mode.width and s.height == headless_mode.height and s.format == v.VK_FORMAT_B8G8R8A8_UNORM and
             (s.usage & v.VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0 and index < s.images and family != null)
         {
             if (media.capture(q, family.?, s.handles[index], wait_slice)) |completion| {
@@ -1622,7 +1630,29 @@ test "wrist marker moments exclude desktop region, white pixels and nonmagenta c
 // --- Scoped userspace display prototype ------------------------------------
 // Enabled only by PP_HEADLESS_DISPLAY=1 in the compositor's environment. Display
 // and mode are layer-owned identifiers; real Mesa owns surface, images and GPU sync.
-// Fixed 1080p75 profile for this experiment. This is not a general WSI implementation.
+// One mode, PP_HEADLESS_MODE=WIDTHxHEIGHT@HZ (default 1920x1080@75), matched to a streaming
+// client's resolution and refresh rate. This is not a general WSI implementation.
+const HeadlessMode = struct { width: u32 = 1920, height: u32 = 1080, hz: u32 = 75 };
+var headless_mode: HeadlessMode = .{};
+fn parseHeadlessMode(text: []const u8) ?HeadlessMode {
+    const x = std.mem.indexOfScalar(u8, text, 'x') orelse return null;
+    const at = std.mem.indexOfScalar(u8, text, '@') orelse return null;
+    if (at < x) return null;
+    const mode: HeadlessMode = .{
+        .width = std.fmt.parseInt(u32, text[0..x], 10) catch return null,
+        .height = std.fmt.parseInt(u32, text[x + 1 .. at], 10) catch return null,
+        .hz = std.fmt.parseInt(u32, text[at + 1 ..], 10) catch return null,
+    };
+    // Even sizes within the encoder's limits; a side-by-side picture needs equal halves.
+    if (mode.width < 64 or mode.width > 8192 or mode.height < 64 or mode.height > 8192 or
+        mode.width % 4 != 0 or mode.height % 2 != 0 or mode.hz < 30 or mode.hz > 240) return null;
+    return mode;
+}
+test "headless mode parsing bounds sizes and rate" {
+    try std.testing.expectEqual(HeadlessMode{ .width = 3680, .height = 1920, .hz = 90 }, parseHeadlessMode("3680x1920@90").?);
+    for ([_][]const u8{ "1920x1080", "1920@75x1080", "1922x1080@75", "1920x1080@300", "x@", "9000x1080@75" }) |bad|
+        try std.testing.expect(parseHeadlessMode(bad) == null);
+}
 var headless_display_tag: u8 = 0;
 var headless_mode_tag: u8 = 0;
 fn headlessDisplay() v.VkDisplayKHR {
@@ -1670,7 +1700,7 @@ fn displayProperties(_: v.VkPhysicalDevice, count: [*c]u32, out: [*c]v.VkDisplay
     props.display = headlessDisplay();
     props.displayName = "PetPlay headless display";
     props.physicalDimensions = .{ .width = 190, .height = 100 };
-    props.physicalResolution = .{ .width = 1920, .height = 1080 };
+    props.physicalResolution = .{ .width = headless_mode.width, .height = headless_mode.height };
     props.supportedTransforms = v.VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     props.persistentContent = v.VK_TRUE;
     log("enumerating virtual display (output={})", .{out != null});
@@ -1681,7 +1711,7 @@ fn displayPlanes(_: v.VkPhysicalDevice, count: [*c]u32, out: [*c]v.VkDisplayPlan
 }
 fn displayModes(pd: v.VkPhysicalDevice, display: v.VkDisplayKHR, count: [*c]u32, out: [*c]v.VkDisplayModePropertiesKHR) callconv(.c) v.VkResult {
     if (display != headlessDisplay()) return I("vkGetDisplayModePropertiesKHR")(pd, display, count, out);
-    return one(v.VkDisplayModePropertiesKHR, count, out, .{ .displayMode = headlessMode(), .parameters = .{ .visibleRegion = .{ .width = 1920, .height = 1080 }, .refreshRate = 75000 } });
+    return one(v.VkDisplayModePropertiesKHR, count, out, .{ .displayMode = headlessMode(), .parameters = .{ .visibleRegion = .{ .width = headless_mode.width, .height = headless_mode.height }, .refreshRate = headless_mode.hz * 1000 } });
 }
 fn planeDisplays(_: v.VkPhysicalDevice, index: u32, count: [*c]u32, out: [*c]v.VkDisplayKHR) callconv(.c) v.VkResult {
     if (index != 0) return v.VK_ERROR_INITIALIZATION_FAILED;
@@ -1692,7 +1722,7 @@ fn planeCapabilities(pd: v.VkPhysicalDevice, mode: v.VkDisplayModeKHR, index: u3
     if (index != 0) return v.VK_ERROR_INITIALIZATION_FAILED;
     out.* = std.mem.zeroes(v.VkDisplayPlaneCapabilitiesKHR);
     out.*.supportedAlpha = v.VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
-    out.*.minSrcExtent = .{ .width = 1920, .height = 1080 };
+    out.*.minSrcExtent = .{ .width = headless_mode.width, .height = headless_mode.height };
     out.*.maxSrcExtent = out.*.minSrcExtent;
     out.*.minDstExtent = out.*.minSrcExtent;
     out.*.maxDstExtent = out.*.minSrcExtent;
@@ -1729,7 +1759,7 @@ fn planeCapabilities2(pd: v.VkPhysicalDevice, info: [*c]const v.VkDisplayPlaneIn
 }
 fn createDisplayMode(pd: v.VkPhysicalDevice, display: v.VkDisplayKHR, info: [*c]const v.VkDisplayModeCreateInfoKHR, alloc: [*c]const v.VkAllocationCallbacks, out: [*c]v.VkDisplayModeKHR) callconv(.c) v.VkResult {
     if (display != headlessDisplay()) return I("vkCreateDisplayModeKHR")(pd, display, info, alloc, out);
-    if (info.*.parameters.visibleRegion.width != 1920 or info.*.parameters.visibleRegion.height != 1080 or info.*.parameters.refreshRate != 75000) return v.VK_ERROR_INITIALIZATION_FAILED;
+    if (info.*.parameters.visibleRegion.width != headless_mode.width or info.*.parameters.visibleRegion.height != headless_mode.height or info.*.parameters.refreshRate != headless_mode.hz * 1000) return v.VK_ERROR_INITIALIZATION_FAILED;
     out.* = headlessMode();
     return v.VK_SUCCESS;
 }
@@ -1745,7 +1775,7 @@ fn displayPower(dev: v.VkDevice, display: v.VkDisplayKHR, info: [*c]const v.VkDi
 fn surfaceCapabilities(pd: v.VkPhysicalDevice, surface: v.VkSurfaceKHR, out: [*c]v.VkSurfaceCapabilitiesKHR) callconv(.c) v.VkResult {
     const result = I("vkGetPhysicalDeviceSurfaceCapabilitiesKHR")(pd, surface, out);
     if (result == v.VK_SUCCESS and surfaceKind(surface) == .headless) {
-        out.*.currentExtent = .{ .width = 1920, .height = 1080 };
+        out.*.currentExtent = .{ .width = headless_mode.width, .height = headless_mode.height };
         out.*.minImageExtent = out.*.currentExtent;
         out.*.maxImageExtent = out.*.currentExtent;
     }
@@ -1767,7 +1797,8 @@ fn displayEvent(dev: v.VkDevice, display: v.VkDisplayKHR, info: [*c]const v.VkDi
     // signalled fence. This fence says nothing about GPU render completion. Actual
     // image safety comes from the compositor's present waits and Mesa's swapchain.
     const n = monotonicNs();
-    const tick = ((@as(u128, n) * 75 / 1_000_000_000 + 1) * 1_000_000_000 + 74) / 75;
+    const hz: u128 = headless_mode.hz;
+    const tick = ((@as(u128, n) * hz / 1_000_000_000 + 1) * 1_000_000_000 + hz - 1) / hz;
     var deadline: linux.timespec = .{ .sec = @intCast(tick / 1_000_000_000), .nsec = @intCast(tick % 1_000_000_000) };
     while (linux.errno(linux.clock_nanosleep(.MONOTONIC, .{ .ABSTIME = true }, &deadline, null)) == .INTR) {}
     var create = std.mem.zeroes(v.VkFenceCreateInfo);
@@ -1778,7 +1809,7 @@ fn displayEvent(dev: v.VkDevice, display: v.VkDisplayKHR, info: [*c]const v.VkDi
 fn swapchainCounter(dev: v.VkDevice, chain: v.VkSwapchainKHR, counter: v.VkSurfaceCounterFlagBitsEXT, out: [*c]u64) callconv(.c) v.VkResult {
     if (swapchainRecord(chain)) |s| if (s.kind == .headless) {
         if (counter != v.VK_SURFACE_COUNTER_VBLANK_BIT_EXT) return v.VK_ERROR_FEATURE_NOT_PRESENT;
-        out.* = @intCast(@as(u128, monotonicNs()) * 75 / 1_000_000_000);
+        out.* = @intCast(@as(u128, monotonicNs()) * headless_mode.hz / 1_000_000_000);
         return v.VK_SUCCESS;
     };
     return D("vkGetSwapchainCounterEXT")(dev, chain, counter, out);

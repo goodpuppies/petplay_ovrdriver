@@ -42,6 +42,7 @@ struct Settings final : vr::IVRSettings {
   if(!std::strcmp(key,"renderHeight"))return 3562;
   if(!std::strcmp(key,"displayEyeWidth") || !std::strcmp(key,"displayEyeHeight"))return 2544;
   if(!std::strcmp(key,"maxSwapchainMiB"))return 4096;
+  if(!std::strcmp(key,"poseLatchLeadUs"))return 3000;
   assert(!std::strcmp(key,"refreshHz"));return rate;
  }
  float GetFloat(const char *section,const char *key,vr::EVRSettingsError *err) override {

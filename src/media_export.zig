@@ -24,6 +24,9 @@ pub fn Exporter(comptime v: type) type {
         var attempted = false;
         var failed = false;
         var sequence: u64 = 0;
+        /// The headless display's size; every slot, copy and descriptor uses it.
+        pub var width: u32 = 1920;
+        pub var height: u32 = 1080;
         var sent: u64 = 0;
         var dropped: u64 = 0;
         var released: u64 = 0;
@@ -69,7 +72,7 @@ pub fn Exporter(comptime v: type) type {
             @memcpy(@as([*]u8, @ptrCast(&address.sun_path))[0..path.len], path);
             if (c.connect(socket, @ptrCast(&address), @sizeOf(c.struct_sockaddr_un)) != 0) return error.Connect;
             for (&slots) |*s| try createSlot(s, family);
-            log("pool ready slots=3 BGRA=1920x1080 modifier=0 raw_cpu_bytes=0", .{});
+            log("pool ready slots=3 BGRA={d}x{d} modifier=0 raw_cpu_bytes=0", .{ width, height });
         }
         fn createSlot(s: *Slot, family: u32) !void {
             var modifier_info = std.mem.zeroes(v.VkPhysicalDeviceImageDrmFormatModifierInfoEXT);
@@ -107,7 +110,7 @@ pub fn Exporter(comptime v: type) type {
             ci.pNext = &ei;
             ci.imageType = v.VK_IMAGE_TYPE_2D;
             ci.format = format.format;
-            ci.extent = .{ .width = 1920, .height = 1080, .depth = 1 };
+            ci.extent = .{ .width = width, .height = height, .depth = 1 };
             ci.mipLevels = 1;
             ci.arrayLayers = 1;
             ci.samples = v.VK_SAMPLE_COUNT_1_BIT;
@@ -276,7 +279,7 @@ pub fn Exporter(comptime v: type) type {
             var region = std.mem.zeroes(v.VkImageCopy);
             region.srcSubresource = .{ .aspectMask = v.VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 };
             region.dstSubresource = region.srcSubresource;
-            region.extent = .{ .width = 1920, .height = 1080, .depth = 1 };
+            region.extent = .{ .width = width, .height = height, .depth = 1 };
             D("vkCmdCopyImage")(s.cmd, source, v.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, s.image, v.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
             barriers[0].oldLayout = v.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
             barriers[0].newLayout = v.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -331,8 +334,8 @@ pub fn Exporter(comptime v: type) type {
             put32(&data, 12, if (ready_fd < 0) 1 else 0);
             put64(&data, 16, s.sequence);
             put64(&data, 24, now());
-            put32(&data, 32, 1920);
-            put32(&data, 36, 1080);
+            put32(&data, 32, width);
+            put32(&data, 36, height);
             put32(&data, 40, s.pitch);
             put32(&data, 44, s.offset);
             put64(&data, 48, 0);
