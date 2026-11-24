@@ -11,7 +11,7 @@ new actor incarnation; reconnecting during the same initialization preserves ide
 
 Stageforge's attachProxy registers a Worker-shaped connection under the existing actor ID.
 Normal PostMan addressing and TYPE:callback-id replies work through it. detachProxy, proxy
-murder and graph reboot close only the local connection; none sends SHUTDOWN to the driver.
+shutdown (`postal.shutdown`) and graph reboot close only the local connection; none sends SHUTDOWN to the driver.
 Generic reload refuses external actors and asks the caller to detach/reattach explicitly.
 Process lifetime, driver cleanup and explicit device-control commands are separate concerns.
 
