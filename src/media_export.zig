@@ -22,7 +22,9 @@ pub fn Exporter(comptime v: type) type {
         var gipa: v.PFN_vkGetInstanceProcAddr = null;
         var socket: i32 = -1;
         var attempted = false;
+        var pool_ready = false;
         var failed = false;
+        var next_retry_ns: u64 = 0;
         var sequence: u64 = 0;
         /// The headless display's size; every slot, copy and descriptor uses it.
         pub var width: u32 = 1920;
@@ -62,17 +64,46 @@ pub fn Exporter(comptime v: type) type {
             if (linux.errno(linux.clock_gettime(.MONOTONIC, &t)) != .SUCCESS) return 0;
             return @as(u64, @intCast(t.sec)) * 1_000_000_000 + @as(u64, @intCast(t.nsec));
         }
-        fn open(family: u32) !void {
+        fn connectSocket() !void {
             const path = std.mem.span(getenv("PP_MEDIA_SOCKET") orelse return error.NoMediaSocket);
             if (path.len == 0 or path.len >= 108 or path[0] != '/') return error.InvalidSocket;
-            socket = c.socket(c.AF_UNIX, c.SOCK_SEQPACKET | c.SOCK_NONBLOCK | c.SOCK_CLOEXEC, 0);
-            if (socket < 0) return error.Socket;
+            const fd = c.socket(c.AF_UNIX, c.SOCK_SEQPACKET | c.SOCK_NONBLOCK | c.SOCK_CLOEXEC, 0);
+            if (fd < 0) return error.Socket;
             var address = std.mem.zeroes(c.struct_sockaddr_un);
             address.sun_family = c.AF_UNIX;
             @memcpy(@as([*]u8, @ptrCast(&address.sun_path))[0..path.len], path);
-            if (c.connect(socket, @ptrCast(&address), @sizeOf(c.struct_sockaddr_un)) != 0) return error.Connect;
-            for (&slots) |*s| try createSlot(s, family);
-            log("pool ready slots=3 BGRA={d}x{d} modifier=0 raw_cpu_bytes=0", .{ width, height });
+            if (c.connect(fd, @ptrCast(&address), @sizeOf(c.struct_sockaddr_un)) != 0) {
+                _ = c.close(fd);
+                return error.Connect;
+            }
+            socket = fd;
+        }
+        fn disconnect(reason: []const u8) void {
+            if (socket >= 0) {
+                _ = c.close(socket);
+                socket = -1;
+            }
+            for (&slots) |*s| if (s.busy) {
+                s.discarded = true;
+            };
+            next_retry_ns = now() + 500_000_000;
+            log("disconnected ({s}); will reconnect", .{reason});
+        }
+        fn open(family: u32) !void {
+            try connectSocket();
+            if (!pool_ready) {
+                errdefer {
+                    if (socket >= 0) {
+                        _ = c.close(socket);
+                        socket = -1;
+                    }
+                }
+                for (&slots) |*s| try createSlot(s, family);
+                pool_ready = true;
+                log("pool ready slots=3 BGRA={d}x{d} modifier=0 raw_cpu_bytes=0", .{ width, height });
+            } else {
+                log("reconnected to media socket", .{});
+            }
         }
         fn createSlot(s: *Slot, family: u32) !void {
             var modifier_info = std.mem.zeroes(v.VkPhysicalDeviceImageDrmFormatModifierInfoEXT);
@@ -192,22 +223,27 @@ pub fn Exporter(comptime v: type) type {
         }
         pub fn capture(queue: v.VkQueue, family: u32, source: v.VkImage, waits: []const v.VkSemaphore) ?v.VkSemaphore {
             if (!requested() or failed) return null;
-            if (!attempted) {
+            for (&slots) |*s| if (s.discarded and D("vkGetFenceStatus")(dev, s.fence) == v.VK_SUCCESS) {
+                s.discarded = false;
+                s.busy = false;
+            };
+            if (socket < 0) {
+                const t = now();
+                if (t < next_retry_ns) return null;
                 attempted = true;
                 open(family) catch |err| {
+                    if (err == error.Connect or err == error.Socket) {
+                        next_retry_ns = t + 1_000_000_000;
+                        return null;
+                    }
                     failed = true;
                     log("disabled: {s}", .{@errorName(err)});
                     return null;
                 };
             }
             acks() catch |err| {
-                failed = true;
-                log("disabled: {s}", .{@errorName(err)});
+                disconnect(@errorName(err));
                 return null;
-            };
-            for (&slots) |*s| if (s.discarded and D("vkGetFenceStatus")(dev, s.fence) == v.VK_SUCCESS) {
-                s.discarded = false;
-                s.busy = false;
             };
             sequence += 1;
             for (&slots, 0..) |*s, index| if (!s.busy) {
@@ -309,11 +345,10 @@ pub fn Exporter(comptime v: type) type {
             s.used = true;
             s.sequence = sequence;
             // From here the present MUST wait on completion, including any IPC failure.
-            // Export/send errors disable media while returning that completion semaphore.
+            // Export/send errors disconnect and retry while returning that completion semaphore.
             sendFrame(s, index) catch |err| {
-                failed = true;
                 s.discarded = true;
-                log("send disabled after GPU submit: {s}", .{@errorName(err)});
+                disconnect(@errorName(err));
             };
         }
         fn sendFrame(s: *Slot, index: usize) !void {
